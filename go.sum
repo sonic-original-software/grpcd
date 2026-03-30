@@ -2,6 +2,8 @@ git.sonicoriginal.software/grpc-foundation v0.0.0-20251130150656-52d9c12e9e25 h1
 git.sonicoriginal.software/grpc-foundation v0.0.0-20251130150656-52d9c12e9e25/go.mod h1:V7EbRIqXKJ30rpJo4TR/ilwCxXeXRd8Cvn0GTEJGoEI=
 git.sonicoriginal.software/grpc-foundation v0.1.1 h1:qNZ5F0j6dNgojes/46Jc0yzxkKiHewmBcWgxStgnTmc=
 git.sonicoriginal.software/grpc-foundation v0.1.1/go.mod h1:qOsNlxuii88ZXNLG4J4NSYl/KTad/TNXlm/XpP9jSIk=
+git.sonicoriginal.software/grpc-foundation v0.1.2 h1:FdOgjuWY2Pq6yYYEO7jcVAiQeEQRelYIGLa6KtdZXnw=
+git.sonicoriginal.software/grpc-foundation v0.1.2/go.mod h1:qOsNlxuii88ZXNLG4J4NSYl/KTad/TNXlm/XpP9jSIk=
 git.sonicoriginal.software/grpc-protos v0.0.0-20251108140605-218f8e8fde80 h1:K/oVJNA65IHpAJSECWcuWCRhC98Akdr8IXAnAB1u2/8=
 git.sonicoriginal.software/grpc-protos v0.0.0-20251108140605-218f8e8fde80/go.mod h1:RxkRaE4KtcsoIb34aMjElTNqJ3N9lw4dLg4XrXNo+YA=
 git.sonicoriginal.software/grpc-protos v0.1.0 h1:Fm5LNmZpZXDQIhmDPZdroIvrP9IPcjD/Kmz6y7uuby0=
