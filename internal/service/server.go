@@ -9,9 +9,6 @@ import (
 
 	grpcd "git.sonicoriginal.software/grpcd-protos"
 
-	"git.sonicoriginal.software/grpc-protos/diagnostics"
-	"git.sonicoriginal.software/grpc-protos/info"
-
 	"git.sonicoriginal.software/logger"
 
 	"go.opentelemetry.io/otel/metric"
@@ -24,9 +21,6 @@ const (
 
 // GRPCDServer implements the GRPCDService
 type GRPCDServer struct {
-	info.UnimplementedInfoServiceServer
-	diagnostics.UnimplementedDiagnosticsServiceServer
-
 	grpcd.UnimplementedGRPCDServiceServer
 	log   *slog.Logger
 	store storage.Store
