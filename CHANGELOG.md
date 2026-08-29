@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## 0.2.0 - 2026-08-29
+#### Features
+- update grpcd-go reliance and clean up behaviors - (cf5793a) - Nathan Blair
+
+- - -
+
 ## 0.1.1 - 2026-03-30
 #### Bug Fixes
 - update to fix grpc-foundation - (883054b) - Nathan Blair
