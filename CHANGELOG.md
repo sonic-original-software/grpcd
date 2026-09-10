@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## 0.3.0 - 2026-09-10
+#### Features
+- don't use TTL-based registration - (8fffbe1) - Nathan Blair
+#### Bug Fixes
+- update health probe version and fix otel sdk log format issues - (3b4c296) - Nathan Blair
+
+- - -
+
 ## 0.2.0 - 2026-08-29
 #### Features
 - update grpcd-go reliance and clean up behaviors - (cf5793a) - Nathan Blair
