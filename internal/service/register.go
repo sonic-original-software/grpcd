@@ -2,20 +2,19 @@ package service
 
 import (
 	"context"
-	"os"
+	"log/slog"
+	"net"
 	"strconv"
-	"time"
 
-	"git.sonicoriginal.software/grpcd/internal"
-	"git.sonicoriginal.software/grpcd/internal/validate"
-
-	grpcd "git.sonicoriginal.software/grpcd-protos"
-
-	"git.sonicoriginal.software/grpc-foundation/errors"
+	"google.golang.org/grpc/peer"
 
 	"git.sonicoriginal.software/logger"
 
-	"google.golang.org/grpc/peer"
+	"git.sonicoriginal.software/grpc-foundation/errors"
+	grpcd "git.sonicoriginal.software/grpcd-protos"
+
+	"git.sonicoriginal.software/grpcd/internal"
+	"git.sonicoriginal.software/grpcd/internal/validate"
 )
 
 const (
@@ -24,80 +23,120 @@ const (
 
 // validateRegisterRequest validates a RegisterRequest
 func validateRegisterRequest(req *grpcd.RegisterRequest) []errors.FieldViolation {
-	return validate.Methods(req.Methods)
-}
+	violations := validate.Methods(req.Methods)
 
-// Register registers a new service instance
-func (s *GRPCDServer) Register(
-	ctx context.Context, req *grpcd.RegisterRequest,
-) (*grpcd.RegisterResponse, error) {
-	log := logger.FromContext(ctx)
-
-	// Validate request
-	violations := validateRegisterRequest(req)
-	if len(violations) > 0 {
-		return nil, errors.InvalidArgument(ctx, "validation failed", violations...)
+	if req.Port == 0 || req.Port > 65535 {
+		violations = append(violations, errors.FieldViolation{
+			Field:       "port",
+			Description: "port must be between 1 and 65535",
+		})
 	}
 
-	// Extract real address from gRPC peer context (cannot be spoofed)
-	p, ok := peer.FromContext(ctx)
+	return violations
+}
+
+// Register records the caller's methods and holds the stream open.
+//
+// The stream is the registration: the rows exist while it is held, and this
+// handler removes them on its way out. A caller that crashes ends the stream
+// the same way a caller that exits cleanly does, so both are the same path.
+func (s *GRPCDServer) Register(
+	req *grpcd.RegisterRequest, stream grpcd.GRPCDService_RegisterServer,
+) error {
+	ctx := stream.Context()
+	log := logger.FromContext(ctx).With("server_name", req.ServerName)
+
+	violations := validateRegisterRequest(req)
+	if len(violations) > 0 {
+		return errors.InvalidArgument(ctx, "validation failed", violations...)
+	}
+
+	address, err := s.address(ctx, req.Port)
+	if err != nil {
+		log.ErrorContext(ctx, "Failed to extract peer info from context")
+
+		return err
+	}
+
+	log = log.With("peer_address", address, "method_count", len(req.Methods))
+
+	log.InfoContext(ctx, "Registering service instance")
+	log.DebugContext(ctx, "Registering methods", "methods", req.Methods)
+
+	if err := s.store.Add(ctx, address, s.anchor, req.Methods); err != nil {
+		log.ErrorContext(ctx, "Failed to register methods", "error", err)
+
+		return errors.Internal(
+			ctx, "failed to register service", errCodeRegistrationFailed, internal.ErrDomain,
+		)
+	}
+
+	if err := stream.Send(&grpcd.RegisterResponse{}); err != nil {
+		log.ErrorContext(ctx, "Failed to acknowledge registration", "error", err)
+		s.release(ctx, log, address, req.Methods)
+
+		return err
+	}
+
+	if s.registrationCount != nil {
+		s.registrationCount.Add(ctx, 1)
+	}
+
+	log.InfoContext(ctx, "Successfully registered service instance")
+
+	// Holding the stream is the registration. Returning ends it, so this waits
+	// for the caller to go away.
+	<-ctx.Done()
+
+	s.release(ctx, log, address, req.Methods)
+
+	return nil
+}
+
+// release removes the rows this stream was holding.
+//
+// The context that ended the stream is already cancelled, so the removal runs
+// on one detached from it. Nothing else will run this removal: the rows carry
+// no expiry, and this instance is the only one watching this stream.
+func (s *GRPCDServer) release(
+	ctx context.Context, log *slog.Logger, address string, methods []string,
+) {
+	ctx = context.WithoutCancel(ctx)
+
+	if err := s.store.Remove(ctx, address, methods); err != nil {
+		log.ErrorContext(ctx, "Failed to remove methods", "error", err)
+
+		return
+	}
+
+	if s.removalCount != nil {
+		s.removalCount.Add(ctx, 1)
+	}
+
+	log.InfoContext(ctx, "Removed service instance")
+}
+
+// address composes the caller's address from the IP on the connection and the
+// port the caller reported.
+//
+// Neither half is available on its own: a containerized service does not know
+// its reachable IP, and the port on the peer socket is the ephemeral one the
+// caller dialed from.
+func (s *GRPCDServer) address(ctx context.Context, port uint32) (string, error) {
+	info, ok := peer.FromContext(ctx)
 	if !ok {
-		log.Error("Failed to extract peer info from context")
-		return nil, errors.Internal(
+		return "", errors.Internal(
 			ctx,
 			"failed to extract connection info",
 			ErrCodePeerInfoUnavailable,
 			internal.ErrDomain,
 		)
 	}
-	address := p.Addr.String()
-	methodCount := len(req.Methods)
 
-	log.Info("Registering service instance",
-		"address", address,
-		"method_count", methodCount)
-
-	log.Debug("Registering methods", "methods", req.Methods)
-
-	// Read TTL from environment variable (hot-read, no restart needed)
-	ttlMinutes := 10 // default
-	if ttlEnv := os.Getenv("REGISTRATION_TTL_MINUTES"); ttlEnv != "" {
-		if parsed, err := strconv.Atoi(ttlEnv); err == nil && parsed > 0 {
-			ttlMinutes = parsed
-		} else {
-			log.Warn("Invalid REGISTRATION_TTL_MINUTES, using default",
-				"value", ttlEnv,
-				"default", ttlMinutes)
-		}
-	}
-	ttl := time.Duration(ttlMinutes) * time.Minute
-
-	// Store each method → address mapping with TTL
-	for _, method := range req.Methods {
-		err := s.store.SetMethodAddress(ctx, method, address, ttl)
-		if err != nil {
-			log.Error("Failed to register method",
-				"method", method,
-				"address", address,
-				"error", err)
-			return nil, errors.Internal(
-				ctx,
-				"failed to register service",
-				errCodeRegistrationFailed,
-				internal.ErrDomain,
-			)
-		}
+	host, _, err := net.SplitHostPort(info.Addr.String())
+	if err != nil {
+		host = info.Addr.String()
 	}
 
-	log.Info("Successfully registered service instance",
-		"address", address,
-		"method_count", methodCount,
-		"ttl_minutes", ttlMinutes)
-
-	// Update metrics
-	if s.registrationCount != nil {
-		s.registrationCount.Add(ctx, 1)
-	}
-
-	return &grpcd.RegisterResponse{}, nil
+	return net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10)), nil
 }

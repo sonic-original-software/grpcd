@@ -3,6 +3,7 @@ package resolver
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -11,26 +12,29 @@ import (
 	"git.sonicoriginal.software/grpcd/internal/storage/redis"
 )
 
-// Resolve a storage Store by the storage backend and address env variables
+// Resolve a storage Store by the storage backend and address env variables.
+//
+// An unreachable backend is returned as an error rather than ended here, so the
+// caller's shutdown still runs and the log explaining the failure is exported.
 func Resolve(ctx context.Context, log *slog.Logger) (storage.Store, error) {
 	backend := os.Getenv(storage.EnvStorageBackend)
 	address := os.Getenv(storage.EnvStorageAddress)
 
-	var store storage.Store
+	switch backend {
+	case "redis":
+		store := redis.NewRedisStore(address)
 
-	if backend == "redis" {
-		store = redis.NewRedisStore(address)
 		if err := store.Ping(ctx); err != nil {
-			log.ErrorContext(ctx, storage.ErrStorageNotReachable.Error())
-			os.Exit(1)
+			return nil, fmt.Errorf("%w: %w", storage.ErrStorageNotReachable, err)
 		}
-		log.Info("Using redis storage", "address", address)
-	} else if backend == "" || address == "" {
-		log.Info("Using volatile storage")
-		store = mock.NewStore()
-	} else {
-		return nil, storage.ErrStorageNotConfigured
-	}
 
-	return store, nil
+		log.InfoContext(ctx, "Using redis storage", "address", address)
+
+		return store, nil
+	case "":
+		log.InfoContext(ctx, "Using volatile storage")
+		return mock.NewStore(), nil
+	default:
+		return nil, fmt.Errorf("%w: unknown backend %q", storage.ErrStorageNotConfigured, backend)
+	}
 }

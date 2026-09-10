@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"testing"
 
-	"git.sonicoriginal.software/grpcd/internal/storage/mock"
-
 	"git.sonicoriginal.software/grpc-testing/mocks/meter"
+
+	"git.sonicoriginal.software/grpcd/internal/storage/mock"
 )
 
 // newStorageCheckServer builds a server over a mock store whose Ping fails with
@@ -16,7 +16,7 @@ func newStorageCheckServer(pingErr error) *GRPCDServer {
 	store := mock.NewStore()
 	store.SetPingError(pingErr)
 
-	return NewGRPCDServer(slog.New(slog.DiscardHandler), store, meter.New())
+	return NewGRPCDServer(slog.New(slog.DiscardHandler), store, meter.New(), testAnchor)
 }
 
 func TestStorageCheck(t *testing.T) {

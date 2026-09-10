@@ -2,8 +2,16 @@
 package redis
 
 import (
+	"errors"
+
 	"github.com/redis/go-redis/v9"
 )
+
+// isNil reports whether err is Redis answering that a key does not exist, which
+// every caller here treats as an absent value rather than a failure.
+func isNil(err error) bool {
+	return errors.Is(err, redis.Nil)
+}
 
 // Store implements Store using Redis as the backend
 type Store struct {

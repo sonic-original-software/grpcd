@@ -1,8 +1,23 @@
 package service
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"strings"
+	"sync"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/peer"
+
+	"git.sonicoriginal.software/grpc-testing/mocks/addr"
+	"git.sonicoriginal.software/grpc-testing/mocks/meter"
+	grpcd "git.sonicoriginal.software/grpcd-protos"
+
+	"git.sonicoriginal.software/grpcd/internal/storage/mock"
 )
+
+const testAnchor = "anchor-under-test"
 
 // isValidMethodName checks if a method name is valid according to validation rules
 // This must match the validation logic in internal/validate/common.go
@@ -38,4 +53,149 @@ func isValidMethodName(name string) bool {
 	}
 
 	return true
+}
+
+// newServer builds a server on a fresh mock store, which the caller keeps to
+// assert on.
+func newServer() (*GRPCDServer, *mock.Store) {
+	store := mock.NewStore()
+
+	return NewGRPCDServer(slog.New(slog.DiscardHandler), store, meter.New(), testAnchor), store
+}
+
+// peerContext puts a connection address on ctx the way gRPC does, so the
+// handler composes the same address a real caller would produce.
+func peerContext(ctx context.Context, address string) context.Context {
+	return peer.NewContext(ctx, &peer.Peer{Addr: addr.New(address)})
+}
+
+// registerStream stands in for a held registration stream. Cancelling the
+// context it carries is what a caller going away looks like to the handler.
+type registerStream struct {
+	grpc.ServerStream
+
+	ctx context.Context
+
+	mu       sync.Mutex
+	sent     []*grpcd.RegisterResponse
+	sendErr  error
+	received chan struct{}
+}
+
+func newRegisterStream(ctx context.Context) *registerStream {
+	return &registerStream{ctx: ctx, received: make(chan struct{}, 1)}
+}
+
+func (s *registerStream) Context() context.Context { return s.ctx }
+
+func (s *registerStream) Send(response *grpcd.RegisterResponse) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sendErr != nil {
+		return s.sendErr
+	}
+
+	s.sent = append(s.sent, response)
+
+	select {
+	case s.received <- struct{}{}:
+	default:
+	}
+
+	return nil
+}
+
+// acknowledged blocks until the handler has confirmed the registration, so a
+// test acts on a stream that is actually being held.
+func (s *registerStream) acknowledged() <-chan struct{} { return s.received }
+
+func (s *registerStream) sends() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.sent)
+}
+
+// discoverStream stands in for a client discovering a method. requests are
+// replayed in order, and responses records the candidates the handler offered.
+type discoverStream struct {
+	grpc.ServerStream
+
+	ctx context.Context
+
+	requests []recvResult
+	received int
+
+	mu        sync.Mutex
+	responses []string
+	sendErr   error
+}
+
+// recvResult is one message the fake client sends, or the error ending it.
+type recvResult struct {
+	request *grpcd.DiscoverRequest
+	err     error
+}
+
+// asks builds a stream that requests method and then reports each of dead as
+// unreachable, ending once they are exhausted.
+func asks(ctx context.Context, method string, dead ...string) *discoverStream {
+	requests := []recvResult{{
+		request: &grpcd.DiscoverRequest{
+			Step: &grpcd.DiscoverRequest_MethodName{MethodName: method},
+		},
+	}}
+
+	for _, address := range dead {
+		requests = append(requests, recvResult{
+			request: &grpcd.DiscoverRequest{
+				Step: &grpcd.DiscoverRequest_DeadAddress{DeadAddress: address},
+			},
+		})
+	}
+
+	return &discoverStream{ctx: ctx, requests: requests}
+}
+
+// satisfiedAfter builds a stream that requests method, reports each of dead,
+// and then closes — which is how a caller says the last candidate worked.
+func satisfiedAfter(ctx context.Context, method string, dead ...string) *discoverStream {
+	stream := asks(ctx, method, dead...)
+	stream.requests = append(stream.requests, recvResult{err: io.EOF})
+
+	return stream
+}
+
+func (s *discoverStream) Context() context.Context { return s.ctx }
+
+func (s *discoverStream) Recv() (*grpcd.DiscoverRequest, error) {
+	if s.received >= len(s.requests) {
+		return nil, io.EOF
+	}
+
+	result := s.requests[s.received]
+	s.received++
+
+	return result.request, result.err
+}
+
+func (s *discoverStream) Send(response *grpcd.DiscoverResponse) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sendErr != nil {
+		return s.sendErr
+	}
+
+	s.responses = append(s.responses, response.Address)
+
+	return nil
+}
+
+func (s *discoverStream) candidates() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]string(nil), s.responses...)
 }

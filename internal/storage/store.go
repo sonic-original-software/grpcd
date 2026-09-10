@@ -4,7 +4,7 @@ package storage
 import (
 	"context"
 	"errors"
-	"time"
+	"iter"
 )
 
 const (
@@ -19,7 +19,7 @@ const (
 )
 
 var (
-	// ErrMethodNotFound is returned when a method mapping is not found
+	// ErrMethodNotFound is returned when a method has no registered addresses
 	ErrMethodNotFound = errors.New("method not found")
 
 	// ErrStorageNotConfigured is returned when storage environment variables are not set
@@ -29,27 +29,58 @@ var (
 	ErrStorageNotReachable = errors.New("storage not reachable")
 )
 
-// Store defines the interface for grpcd service storage operations
-// Stores method → address mappings with TTL-based expiry
+// Removal names a row that was taken out. It carries the method as well as the
+// address so whoever anchored it can write back exactly what was removed
+// without holding a record of what it registered.
+type Removal struct {
+	Method  string
+	Address string
+}
+
+// Store holds which addresses serve which methods, and which instance anchors
+// each address.
+//
+// Nothing it stores expires. A row is removed when the instance holding that
+// address's registration stream sees the stream end, or when a client reports
+// it could not reach the address.
 type Store interface {
-	// SetMethodAddress stores a method → address mapping with TTL
-	// If the method already exists, it overwrites the address and resets TTL
-	SetMethodAddress(ctx context.Context, method, address string, ttl time.Duration) error
+	// Add records that address serves each of methods, anchored to the instance
+	// identified by anchor.
+	//
+	// Registering an address that is already present leaves the set as it was,
+	// so a re-registration after a lost instance is the same write barring the
+	// anchor changing.
+	Add(ctx context.Context, address, anchor string, methods []string) error
 
-	// GetMethodAddress retrieves the address for a method
-	// Returns ErrMethodNotFound if the method is not registered
-	GetMethodAddress(ctx context.Context, method string) (string, error)
+	// Remove takes address out of each of methods and forgets its anchor.
+	//
+	// The caller is the instance whose registration stream just ended, and it
+	// held the method list for the life of that stream, so no reverse mapping
+	// is stored to reconstruct it.
+	Remove(ctx context.Context, address string, methods []string) error
 
-	// DeleteMethodAddress removes a specific method → address mapping
-	DeleteMethodAddress(ctx context.Context, method string) error
+	// RemoveFromMethod takes address out of one method's set and answers with
+	// the anchor that address was registered under, so the caller can tell that
+	// instance what it did.
+	//
+	// This is the client-reported path: a client knows the address it could not
+	// reach and the method it asked for, and nothing else that address serves.
+	// Those other methods are removed the same way, by a client failing on them.
+	RemoveFromMethod(ctx context.Context, method, address string) (anchor string, err error)
 
-	// GetMethodsByAddress retrieves all methods registered by a specific address
-	// Used for bulk operations during deregistration
-	GetMethodsByAddress(ctx context.Context, address string) ([]string, error)
+	// AddressesFor walks the addresses serving method. The sequence ends after
+	// the last address, or early if the caller stops reading, so a method with
+	// thousands of addresses is never materialized to answer one lookup.
+	//
+	// A method with no addresses yields nothing.
+	AddressesFor(ctx context.Context, method string) iter.Seq2[string, error]
 
-	// DeleteMethodsByAddress removes all methods registered by a specific address
-	// Used during deregistration to clean up all methods for an instance
-	DeleteMethodsByAddress(ctx context.Context, address string) error
+	// Notify tells the instance identified by anchor which row was removed.
+	Notify(ctx context.Context, anchor string, removal Removal) error
+
+	// Watch delivers the rows this instance anchored that something else
+	// removed. It stops when ctx is done.
+	Watch(ctx context.Context, anchor string) (<-chan Removal, error)
 
 	// Ping checks storage connectivity
 	Ping(ctx context.Context) error

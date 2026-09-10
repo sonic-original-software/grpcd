@@ -102,9 +102,19 @@ grpcd is configured entirely through environment variables.
 
 ### Server Configuration
 
-| Variable              | Description                     | Default |
-| --------------------- | ------------------------------- | ------- |
-| `GRPC_SERVER_ADDRESS` | Address to bind the gRPC server | `:5000` |
+| Variable                  | Description                                                  | Default |
+| ------------------------- | ------------------------------------------------------------ | ------- |
+| `GRPC_SERVER_ADDRESS`     | Address to bind the gRPC server                              | `:5000` |
+| `GRPC_MAX_CONNECTION_AGE` | Age at which the server sends a GOAWAY. `0` is no limit.     | `10m`   |
+
+Set `GRPC_MAX_CONNECTION_AGE=0`.
+
+A registration lives as long as the stream holding it, and a GOAWAY ends that
+stream whether or not it is active. At the ten minute default, every
+registration in the mesh is torn down and rebuilt on that timer. It works, and
+it looks healthy, while costing a reconnect per service per interval.
+
+grpcd reports the value in effect at startup.
 
 ### Storage Configuration
 
@@ -113,11 +123,8 @@ grpcd is configured entirely through environment variables.
 | `STORAGE_BACKEND` | Storage backend type (`redis` or empty for in-memory) | -       | No                   |
 | `STORAGE_ADDRESS` | Storage backend address (format depends on backend)   | -       | Yes (if using Redis) |
 
-### Registration Configuration
-
-| Variable                   | Description                                         | Default |
-| -------------------------- | --------------------------------------------------- | ------- |
-| `REGISTRATION_TTL_MINUTES` | How long registrations remain valid without refresh | `10`    |
+A registration lives as long as the stream that made it, so nothing configures
+how long one lasts.
 
 ### Example Configurations
 
@@ -125,6 +132,7 @@ grpcd is configured entirely through environment variables.
 
 ```bash
 export GRPC_SERVER_ADDRESS=:5000
+export GRPC_MAX_CONNECTION_AGE=0
 # No STORAGE_BACKEND set = in-memory storage
 ```
 
@@ -132,9 +140,9 @@ export GRPC_SERVER_ADDRESS=:5000
 
 ```bash
 export GRPC_SERVER_ADDRESS=:5000
+export GRPC_MAX_CONNECTION_AGE=0
 export STORAGE_BACKEND=redis
 export STORAGE_ADDRESS=redis.prod.example.com:6379
-export REGISTRATION_TTL_MINUTES=10
 ```
 
 ## Implementation
@@ -147,11 +155,13 @@ refer to the
 
 ### RPC Implementations
 
-| RPC          | Implementation                      | Notes                                                 |
-| ------------ | ----------------------------------- | ----------------------------------------------------- |
-| `Register`   | `internal/service/register.go:31`   | Extracts real address from peer context for security  |
-| `Discover`   | `internal/service/discover.go:26`   | Returns `NOT_FOUND` if method is not registered       |
-| `Deregister` | `internal/service/deregister.go:20` | Removes all methods for the calling service's address |
+| RPC        | Implementation                 | Notes                                                                 |
+| ---------- | ------------------------------ | --------------------------------------------------------------------- |
+| `Register` | `internal/service/register.go` | Holds the stream; writes the rows on open and removes them on its end |
+| `Discover` | `internal/service/discover.go` | Offers one candidate at a time; `NOT_FOUND` once they are exhausted   |
+
+There is no `Deregister`. Closing the registration stream is what removes the
+rows, so a caller that crashes and one that exits cleanly take the same path.
 
 The server also implements standard diagnostic services defined in
 `grpc-protos`:
@@ -161,32 +171,22 @@ The server also implements standard diagnostic services defined in
 
 ### Security Implementation
 
-This implementation uses gRPC peer context to extract the real client address
-for `Register` and `Deregister` operations. The peer context contains TCP
-connection metadata that cannot be spoofed, preventing address hijacking.
+This implementation uses gRPC peer context to extract the caller's IP during
+`Register`. The peer context contains TCP connection metadata that cannot be
+spoofed, preventing address hijacking.
 
-See `internal/service/register.go:43` and `internal/service/deregister.go:26`
-for implementation details.
+The port comes from the caller, read from its own listener, because the peer
+socket carries only the ephemeral port it dialed from. See
+`internal/service/register.go` for how the two halves are composed.
 
 ## Storage Backends
 
-grpcd uses an abstract storage interface (`internal/storage/store.go:34`) that
+grpcd uses an [abstract storage interface](internal/storage/store.go) that
 supports multiple backends.
 
-### Interface
-
-```go
-type Store interface {
-    SetMethodAddress(ctx, method, address string, ttl time.Duration) error
-    GetMethodAddress(ctx context.Context, method string) (string, error)
-    DeleteMethodAddress(ctx context.Context, method string) error
-    GetMethodsByAddress(ctx context.Context, address string) ([]string, error)
-    DeleteMethodsByAddress(ctx context.Context, address string) error
-    Ping(ctx context.Context) error
-    Name() string
-    Address() string
-}
-```
+Nothing takes a TTL. `AddressesFor` returns a sequence rather than a slice, so a
+method with thousands of addresses costs a caller only the candidates it reads
+before it stops.
 
 ### Available Backends
 
@@ -210,7 +210,8 @@ type Store interface {
 **Characteristics**:
 
 - Persistent storage with optional persistence to disk
-- Native TTL support for automatic cleanup
+- Publish/subscribe, which is how an instance is told a row it anchors was
+  removed
 - Horizontal scaling support (all grpcd instances share state)
 - High availability with Redis Sentinel or Redis Cluster
 
@@ -231,25 +232,6 @@ STORAGE_ADDRESS=redis-host:6379
 ## Development
 
 ### Project Structure
-
-```
-grpcd/
-├── main.go                      # Entry point, server setup
-├── internal/
-│   ├── service/                 # RPC method implementations
-│   │   ├── register.go          # Register RPC
-│   │   ├── discover.go          # Discover RPC
-│   │   ├── deregister.go        # Deregister RPC
-│   │   └── server.go            # Server type and constructor
-│   ├── storage/                 # Storage abstraction
-│   │   ├── store.go             # Store interface
-│   │   ├── resolver/            # Backend resolution logic
-│   │   ├── mock/                # In-memory implementation
-│   │   └── redis/               # Redis implementation
-│   └── validate/                # Request validation
-├── Dockerfile                   # Multi-stage Docker build
-└── compose.yaml                 # Local development with Redis
-```
 
 ### Running Tests
 
@@ -278,20 +260,6 @@ go build -o grpcd .
 CGO_ENABLED=0 go build -ldflags="-w -s" -o grpcd .
 ```
 
-### Dependencies
-
-Major dependencies:
-
-- `grpcd-protos`: Service definition and generated code
-- `grpcd-go`: Client library for registering/discovering methods
-- `grpc-foundation`: Common gRPC server utilities and error handling
-- `grpc-protos`: Standard service interfaces (Info, Diagnostics)
-- `go-redis/v9`: Redis client
-- `google.golang.org/grpc`: gRPC framework
-- `go.opentelemetry.io/otel`: Observability instrumentation
-
-See `go.mod` for complete list.
-
 ### Code Quality
 
 The codebase includes:
@@ -301,10 +269,6 @@ The codebase includes:
 - Structured logging with contextual information
 - OpenTelemetry metrics for monitoring
 - Input validation and error handling
-
-## License
-
-See LICENSE file for details.
 
 ## Related Projects
 

@@ -1,21 +1,26 @@
 package service
 
 import (
-	"io"
-	"log/slog"
-	"strings"
+	"context"
+	"strconv"
 	"testing"
 
-	grpcd "git.sonicoriginal.software/grpcd-protos"
-	"git.sonicoriginal.software/grpcd/internal/storage/mock"
-
-	"git.sonicoriginal.software/grpc-testing/mocks/addr"
-	"git.sonicoriginal.software/grpc-testing/mocks/meter"
-
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+
+	grpcd "git.sonicoriginal.software/grpcd-protos"
 )
+
+// endedStream is a registration stream whose caller is already gone, so the
+// handler runs its whole path — write, acknowledge, remove — without blocking.
+func endedStream(t *testing.T, address string) *registerStream {
+	t.Helper()
+
+	ctx, disconnect := context.WithCancel(peerContext(t.Context(), address))
+	disconnect()
+
+	return newRegisterStream(ctx)
+}
 
 // FuzzRegister_MethodNames validates that Register properly handles all possible method
 // name inputs, rejecting invalid names with InvalidArgument and accepting valid ones.
@@ -36,45 +41,52 @@ func FuzzRegister_MethodNames(f *testing.F) {
 	f.Add("/Service")
 
 	f.Fuzz(func(t *testing.T, methodName string) {
-		// Setup
-		log := slog.New(slog.NewTextHandler(io.Discard, nil))
-		meter := meter.New()
-		store := mock.NewStore()
-		server := NewGRPCDServer(log, store, meter)
+		server, _ := newServer()
 
-		// Create context with peer info
-		addr := addr.New("192.168.1.100:50054")
-		ctx := peer.NewContext(t.Context(), &peer.Peer{Addr: addr})
+		stream := endedStream(t, "192.168.1.100:41234")
 
-		// Test data
-		req := &grpcd.RegisterRequest{Methods: []string{methodName}}
+		err := server.Register(
+			&grpcd.RegisterRequest{Methods: []string{methodName}, Port: 50054}, stream,
+		)
 
-		// Execute
-		_, err := server.Register(ctx, req)
-
-		// Determine if the method name should be valid
 		isValid := isValidMethodName(methodName)
 
 		if isValid {
 			// Valid method names should succeed
 			if err != nil {
 				t.Errorf("expected valid method name %q to succeed, got error: %v", methodName, err)
-			}
-		} else {
-			// Invalid method names should fail with InvalidArgument
-			if err == nil {
-				t.Errorf("expected invalid method name %q to fail, got success", methodName)
+
 				return
 			}
 
-			st, ok := status.FromError(err)
-			if !ok {
-				t.Errorf("expected gRPC status error for invalid method name %q, got: %v", methodName, err)
-				return
+			if stream.sends() != 1 {
+				t.Errorf("expected method name %q to be acknowledged", methodName)
 			}
-			if st.Code() != codes.InvalidArgument {
-				t.Errorf("expected InvalidArgument for invalid method name %q, got %v", methodName, st.Code())
-			}
+
+			return
+		}
+
+		// Invalid method names should fail with InvalidArgument
+		if err == nil {
+			t.Errorf("expected invalid method name %q to fail, got success", methodName)
+
+			return
+		}
+
+		st, ok := status.FromError(err)
+		if !ok {
+			t.Errorf(
+				"expected gRPC status error for invalid method name %q, got: %v", methodName, err,
+			)
+
+			return
+		}
+
+		if st.Code() != codes.InvalidArgument {
+			t.Errorf(
+				"expected InvalidArgument for invalid method name %q, got %v",
+				methodName, st.Code(),
+			)
 		}
 	})
 }
@@ -97,69 +109,54 @@ func FuzzRegister_MethodCounts(f *testing.F) {
 			t.Skip()
 		}
 
-		// Setup
-		log := slog.New(slog.NewTextHandler(io.Discard, nil))
-		meter := meter.New()
-		store := mock.NewStore()
-		server := NewGRPCDServer(log, store, meter)
-
-		// Create context with peer info
-		addr := addr.New("192.168.1.100:50054")
-		ctx := peer.NewContext(t.Context(), &peer.Peer{Addr: addr})
+		server, store := newServer()
 
 		// Generate N valid method names in gRPC format
 		methods := make([]string, methodCount)
-		for i := 0; i < methodCount; i++ {
-			methods[i] = "/Service/Method" + intToString(i)
+		for i := range methods {
+			methods[i] = "/Service/Method" + strconv.Itoa(i)
 		}
 
-		// Execute
-		req := &grpcd.RegisterRequest{Methods: methods}
-		_, err := server.Register(ctx, req)
+		// A stream that is still held, so the rows are there to assert on.
+		ctx, disconnect := context.WithCancel(peerContext(t.Context(), "192.168.1.100:41234"))
+		defer disconnect()
 
-		// Validate behavior based on method count
+		stream := newRegisterStream(ctx)
+
+		returned := held(server, &grpcd.RegisterRequest{Methods: methods, Port: 50054}, stream)
+
 		if methodCount == 0 {
 			// Should fail validation
+			err := await(t, returned, "handler did not return for zero methods")
 			if err == nil {
-				t.Error("expected error for zero methods, got nil")
+				t.Fatal("expected error for zero methods, got nil")
 			}
+
 			st, ok := status.FromError(err)
 			if ok && st.Code() != codes.InvalidArgument {
 				t.Errorf("expected InvalidArgument for zero methods, got %v", st.Code())
 			}
-		} else {
-			// Should succeed
-			if err != nil {
-				t.Errorf("expected success for %d methods, got error: %v", methodCount, err)
-			}
 
-			// Verify all methods were registered
-			for _, method := range methods {
-				storedAddr, err := store.GetMethodAddress(ctx, method)
-				if err != nil {
-					t.Errorf("method %s should be registered", method)
-				} else if storedAddr != addr.String() {
-					t.Errorf("method %s has wrong address: got %s, want %s", method, storedAddr, addr.String())
-				}
+			return
+		}
+
+		await(t, stream.acknowledged(), "registration was never acknowledged")
+
+		// Verify all methods were registered against the composed address
+		for _, method := range methods {
+			addresses := store.Addresses(method)
+
+			if len(addresses) != 1 || addresses[0] != "192.168.1.100:50054" {
+				t.Errorf("method %s holds %v", method, addresses)
+
+				break
 			}
 		}
-	})
-}
 
-func intToString(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var result strings.Builder
-	for n > 0 {
-		result.WriteByte(byte('0' + n%10))
-		n /= 10
-	}
-	// Reverse
-	s := result.String()
-	runes := []rune(s)
-	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-		runes[i], runes[j] = runes[j], runes[i]
-	}
-	return string(runes)
+		disconnect()
+
+		if err := await(t, returned, "handler did not return"); err != nil {
+			t.Errorf("expected success for %d methods, got error: %v", methodCount, err)
+		}
+	})
 }

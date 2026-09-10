@@ -1,38 +1,45 @@
 package mock
 
-// SetSetMethodAddressError sets an error to be returned by SetMethodAddress
-func (s *Store) SetSetMethodAddressError(err error) {
+// SetAddError sets an error to be returned by Add
+func (s *Store) SetAddError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.setMethodAddressErr = err
+	s.addErr = err
 }
 
-// SetGetMethodAddressError sets an error to be returned by GetMethodAddress
-func (s *Store) SetGetMethodAddressError(err error) {
+// SetRemoveError sets an error to be returned by Remove
+func (s *Store) SetRemoveError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.getMethodAddressErr = err
+	s.removeErr = err
 }
 
-// SetDeleteMethodAddressError sets an error to be returned by DeleteMethodAddress
-func (s *Store) SetDeleteMethodAddressError(err error) {
+// SetRemoveFromMethodError sets an error to be returned by RemoveFromMethod
+func (s *Store) SetRemoveFromMethodError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.deleteMethodAddressErr = err
+	s.removeFromMethodErr = err
 }
 
-// SetGetMethodsByAddressError sets an error to be returned by GetMethodsByAddress
-func (s *Store) SetGetMethodsByAddressError(err error) {
+// SetAddressesForError sets an error to be yielded by AddressesFor
+func (s *Store) SetAddressesForError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.getMethodsByAddressErr = err
+	s.addressesForErr = err
 }
 
-// SetDeleteMethodsByAddressError sets an error to be returned by DeleteMethodsByAddress
-func (s *Store) SetDeleteMethodsByAddressError(err error) {
+// SetNotifyError sets an error to be returned by Notify
+func (s *Store) SetNotifyError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.deleteMethodsByAddressErr = err
+	s.notifyErr = err
+}
+
+// SetWatchError sets an error to be returned by Watch
+func (s *Store) SetWatchError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.watchErr = err
 }
 
 // SetPingError sets an error to be returned by Ping

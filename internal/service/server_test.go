@@ -2,82 +2,66 @@ package service
 
 import (
 	"errors"
-	"io"
 	"log/slog"
 	"testing"
 
-	"git.sonicoriginal.software/grpcd/internal/storage/mock"
-
 	"git.sonicoriginal.software/grpc-testing/mocks/meter"
+
+	"git.sonicoriginal.software/grpcd/internal/storage/mock"
 )
 
 func TestNewGRPCDServer(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	store := mock.NewStore()
-	server := NewGRPCDServer(log, store, meter)
+	t.Run("builds a server with its metrics", func(t *testing.T) {
+		server := NewGRPCDServer(
+			slog.New(slog.DiscardHandler), mock.NewStore(), meter.New(), testAnchor,
+		)
 
-	if server == nil {
-		t.Fatal("expected server, got nil")
-	}
-	if server.log == nil {
-		t.Fatal("expected logger to be set")
-	}
-	if server.registrationCount == nil {
-		t.Fatal("expected registrationCount to be set")
-	}
-	if server.deregistrationCount == nil {
-		t.Fatal("expected deregistrationCount to be set")
-	}
-	if server.methodsDiscovered == nil {
-		t.Fatal("expected methodsDiscovered to be set")
-	}
-}
+		if server.log == nil {
+			t.Error("expected logger to be set")
+		}
+		if server.registrationCount == nil {
+			t.Error("expected registrationCount to be set")
+		}
+		if server.removalCount == nil {
+			t.Error("expected removalCount to be set")
+		}
+		if server.methodsDiscovered == nil {
+			t.Error("expected methodsDiscovered to be set")
+		}
+		if server.revertedRemovals == nil {
+			t.Error("expected revertedRemovals to be set")
+		}
+		if server.anchor != testAnchor {
+			t.Errorf("expected anchor %q, got %q", testAnchor, server.anchor)
+		}
+	})
 
-func TestNewGRPCDServer_NilLogger(t *testing.T) {
-	meter := meter.New()
-	store := mock.NewStore()
-	server := NewGRPCDServer(nil, store, meter)
+	t.Run("substitutes a logger when given none", func(t *testing.T) {
+		server := NewGRPCDServer(nil, mock.NewStore(), meter.New(), testAnchor)
 
-	if server == nil {
-		t.Fatal("expected server, got nil")
-	}
-	if server.log == nil {
-		t.Fatal("expected logger to be set even when nil passed")
-	}
-}
+		if server.log == nil {
+			t.Fatal("expected logger to be set even when nil passed")
+		}
+	})
 
-// TestNewGRPCDServer_NilStore validates that NewGRPCDServer creates a mock
-// store when nil is passed, ensuring the server never operates with a nil store.
-func TestNewGRPCDServer_NilStore(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	server := NewGRPCDServer(log, nil, meter)
+	t.Run("substitutes a store when given none", func(t *testing.T) {
+		server := NewGRPCDServer(slog.New(slog.DiscardHandler), nil, meter.New(), testAnchor)
 
-	if server == nil {
-		t.Fatal("expected server, got nil")
-	}
-	if server.store == nil {
-		t.Fatal("expected store to be set even when nil passed")
-	}
-}
+		if server.store == nil {
+			t.Fatal("expected store to be set even when nil passed")
+		}
+	})
 
-func TestNewGRPCDServer_MetricCreationErrors(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	store := mock.NewStore()
+	t.Run("serves without metrics when they cannot be created", func(t *testing.T) {
+		failing := meter.New()
+		failing.SetInt64CounterError(errors.New("metric creation failed"))
 
-	// Inject error for Int64Counter creation
-	meter.SetInt64CounterError(errors.New("metric creation failed"))
+		server := NewGRPCDServer(
+			slog.New(slog.DiscardHandler), mock.NewStore(), failing, testAnchor,
+		)
 
-	// Should still create server, but metrics will be nil and error logged
-	server := NewGRPCDServer(log, store, meter)
-
-	if server == nil {
-		t.Fatal("expected server, got nil")
-	}
-	// Server should still be usable even if metric creation fails
-	if server.log == nil {
-		t.Fatal("expected logger to be set")
-	}
+		if server.log == nil {
+			t.Fatal("expected logger to be set")
+		}
+	})
 }

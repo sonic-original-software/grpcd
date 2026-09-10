@@ -4,14 +4,14 @@ package service
 import (
 	"log/slog"
 
-	"git.sonicoriginal.software/grpcd/internal/storage"
-	"git.sonicoriginal.software/grpcd/internal/storage/mock"
-
-	grpcd "git.sonicoriginal.software/grpcd-protos"
+	"go.opentelemetry.io/otel/metric"
 
 	"git.sonicoriginal.software/logger"
 
-	"go.opentelemetry.io/otel/metric"
+	grpcd "git.sonicoriginal.software/grpcd-protos"
+
+	"git.sonicoriginal.software/grpcd/internal/storage"
+	"git.sonicoriginal.software/grpcd/internal/storage/mock"
 )
 
 const (
@@ -22,18 +22,24 @@ const (
 // GRPCDServer implements the GRPCDService
 type GRPCDServer struct {
 	grpcd.UnimplementedGRPCDServiceServer
-	log   *slog.Logger
-	store storage.Store
+	log    *slog.Logger
+	store  storage.Store
+	anchor string
 
 	// Business metrics
-	registrationCount   metric.Int64Counter
-	deregistrationCount metric.Int64Counter
-	methodsDiscovered   metric.Int64Counter
+	registrationCount metric.Int64Counter
+	removalCount      metric.Int64Counter
+	methodsDiscovered metric.Int64Counter
+	revertedRemovals  metric.Int64Counter
 }
 
-// NewGRPCDServer creates a new grpcd server
+// NewGRPCDServer creates a new grpcd server.
+//
+// anchor identifies this instance for the life of the process. It is recorded
+// on every address this server registers, so whoever removes one of those rows
+// knows which instance to tell.
 func NewGRPCDServer(
-	log *slog.Logger, store storage.Store, meter metric.Meter,
+	log *slog.Logger, store storage.Store, meter metric.Meter, anchor string,
 ) *GRPCDServer {
 	if log == nil {
 		log = logger.NewNullLogger()
@@ -53,13 +59,13 @@ func NewGRPCDServer(
 		log.Error("Failed to create registrations metric", "error", err)
 	}
 
-	deregistrationCount, err := meter.Int64Counter(
-		"grpcd.deregistrations.total",
-		metric.WithDescription("Total number of service deregistrations"),
-		metric.WithUnit("{deregistration}"),
+	removalCount, err := meter.Int64Counter(
+		"grpcd.removals.total",
+		metric.WithDescription("Total number of address removals"),
+		metric.WithUnit("{removal}"),
 	)
 	if err != nil {
-		log.Error("Failed to create deregistrations metric", "error", err)
+		log.Error("Failed to create removals metric", "error", err)
 	}
 
 	methodsDiscovered, err := meter.Int64Counter(
@@ -71,11 +77,24 @@ func NewGRPCDServer(
 		log.Error("Failed to create discoveries metric", "error", err)
 	}
 
+	revertedRemovals, err := meter.Int64Counter(
+		"grpcd.removals.reverted.total",
+		metric.WithDescription(
+			"Total number of removals written back because this instance still holds the stream",
+		),
+		metric.WithUnit("{removal}"),
+	)
+	if err != nil {
+		log.Error("Failed to create reverted removals metric", "error", err)
+	}
+
 	return &GRPCDServer{
-		log:                 log,
-		store:               store,
-		registrationCount:   registrationCount,
-		deregistrationCount: deregistrationCount,
-		methodsDiscovered:   methodsDiscovered,
+		log:               log,
+		store:             store,
+		anchor:            anchor,
+		registrationCount: registrationCount,
+		removalCount:      removalCount,
+		methodsDiscovered: methodsDiscovered,
+		revertedRemovals:  revertedRemovals,
 	}
 }

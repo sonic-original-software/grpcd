@@ -2,66 +2,153 @@ package service
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
+
+	"git.sonicoriginal.software/logger"
+
+	foundationerrors "git.sonicoriginal.software/grpc-foundation/errors"
+	grpcd "git.sonicoriginal.software/grpcd-protos"
 
 	"git.sonicoriginal.software/grpcd/internal"
 	"git.sonicoriginal.software/grpcd/internal/storage"
 	"git.sonicoriginal.software/grpcd/internal/validate"
-
-	grpcd "git.sonicoriginal.software/grpcd-protos"
-
-	"git.sonicoriginal.software/grpc-foundation/errors"
-	"git.sonicoriginal.software/logger"
 )
 
 const (
 	errCodeDiscoverFailed = "DISCOVER_FAILED"
 )
 
-// validateDiscoverRequest validates a DiscoverRequest
-func validateDiscoverRequest(req *grpcd.DiscoverRequest) []errors.FieldViolation {
-	return validate.MethodName(req.MethodName)
-}
-
-// Discover finds the address for a specific method
-func (s *GRPCDServer) Discover(
-	ctx context.Context, req *grpcd.DiscoverRequest,
-) (*grpcd.DiscoverResponse, error) {
+// Discover answers with the addresses serving a method, one at a time.
+//
+// The caller takes the first it can reach and closes the stream. One it cannot
+// reach it reports back, and that address is removed before the next is sent,
+// so the set converges on what is actually reachable without grpcd checking
+// anything itself.
+func (s *GRPCDServer) Discover(stream grpcd.GRPCDService_DiscoverServer) error {
+	ctx := stream.Context()
 	log := logger.FromContext(ctx)
 
-	// Validate request
-	violations := validateDiscoverRequest(req)
-	if len(violations) > 0 {
-		return nil, errors.InvalidArgument(ctx, "validation failed", violations...)
-	}
-
-	log.Info("Discovering method", "method_name", req.MethodName)
-
-	// Lookup method → address
-	address, err := s.store.GetMethodAddress(ctx, req.MethodName)
-	if err == storage.ErrMethodNotFound {
-		log.Info("Method not found", "method_name", req.MethodName)
-		return nil, errors.NotFound(ctx, "method", req.MethodName)
-	}
+	method, err := methodName(ctx, stream)
 	if err != nil {
-		log.Error("Failed to discover method",
-			"method_name", req.MethodName,
-			"error", err)
-		return nil, errors.Internal(
-			ctx,
-			"failed to discover method",
-			errCodeDiscoverFailed,
-			internal.ErrDomain,
-		)
+		return err
 	}
 
-	log.Info("Discover successful",
-		"method_name", req.MethodName,
-		"address", address)
+	log = log.With("method_name", method)
+	log.InfoContext(ctx, "Discovering method")
 
-	// Update metrics
-	if s.methodsDiscovered != nil {
-		s.methodsDiscovered.Add(ctx, 1)
+	sent := 0
+
+	for address, err := range s.store.AddressesFor(ctx, method) {
+		if err != nil {
+			log.ErrorContext(ctx, "Failed to discover method", "error", err)
+
+			return foundationerrors.Internal(
+				ctx, "failed to discover method", errCodeDiscoverFailed, internal.ErrDomain,
+			)
+		}
+
+		if err := stream.Send(&grpcd.DiscoverResponse{Address: address}); err != nil {
+			return err
+		}
+
+		sent++
+
+		reported, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			// The caller reached that address and has nothing more to say.
+			if s.methodsDiscovered != nil {
+				s.methodsDiscovered.Add(ctx, 1)
+			}
+
+			log.InfoContext(ctx, "Discover successful", "method_address", address)
+			return nil
+		}
+
+		if err != nil {
+			return err
+		}
+
+		s.reportedDead(ctx, log, method, reported.GetDeadAddress())
 	}
 
-	return &grpcd.DiscoverResponse{Address: address}, nil
+	log.InfoContext(ctx, "No addresses left for method", "candidates_sent", sent)
+
+	return foundationerrors.NotFound(ctx, "method", method)
+}
+
+// methodName reads the method off the stream's first message.
+func methodName(ctx context.Context, stream grpcd.GRPCDService_DiscoverServer) (string, error) {
+	request, err := stream.Recv()
+	if err != nil {
+		return "", err
+	}
+
+	method := request.GetMethodName()
+
+	if violations := validate.MethodName(method); len(violations) > 0 {
+		return "", foundationerrors.InvalidArgument(ctx, "validation failed", violations...)
+	}
+
+	return method, nil
+}
+
+// reportedDead removes an address the caller could not reach and tells the
+// instance anchoring it, which writes the row back if it still holds that
+// address's registration stream.
+func (s *GRPCDServer) reportedDead(
+	ctx context.Context, log *slog.Logger, method, address string,
+) {
+	if address == "" {
+		return
+	}
+
+	log = log.With("method_address", address)
+
+	anchor, err := s.store.RemoveFromMethod(ctx, method, address)
+	if err != nil {
+		log.ErrorContext(ctx, "Failed to remove unreachable address", "error", err)
+		return
+	}
+
+	if s.removalCount != nil {
+		s.removalCount.Add(ctx, 1)
+	}
+
+	log.InfoContext(ctx, "Removed unreachable address")
+
+	if anchor == "" {
+		return
+	}
+
+	removal := storage.Removal{Method: method, Address: address}
+
+	if err := s.store.Notify(ctx, anchor, removal); err != nil {
+		log.ErrorContext(ctx, "Failed to notify the anchoring instance", "error", err)
+	}
+}
+
+// Reinstate writes back a row removed from under this instance's anchor.
+//
+// The store publishes only to the anchor recorded on the row, and that anchor
+// is gone once the registration stream ends, so a notification arriving means
+// this instance held the stream when the removal happened. That is proof enough
+// to write it back without checking anything.
+//
+// A stream that ended in the meantime leaves a row for a service that is gone,
+// and the next client to fail against it removes it again.
+func (s *GRPCDServer) Reinstate(ctx context.Context, removal storage.Removal) {
+	log := s.log.With("peer_address", removal.Address, "method_name", removal.Method)
+
+	if err := s.store.Add(ctx, removal.Address, s.anchor, []string{removal.Method}); err != nil {
+		log.ErrorContext(ctx, "Failed to reinstate address", "error", err)
+		return
+	}
+
+	if s.revertedRemovals != nil {
+		s.revertedRemovals.Add(ctx, 1)
+	}
+
+	log.InfoContext(ctx, "Reinstated address removed while its stream is held")
 }

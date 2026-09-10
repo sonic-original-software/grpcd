@@ -1,264 +1,252 @@
 package service
 
 import (
+	"context"
 	"errors"
-	"io"
-	"log/slog"
+	"slices"
 	"testing"
-	"time"
 
-	"git.sonicoriginal.software/grpcd/internal/storage/mock"
+	"google.golang.org/grpc/codes"
 
 	grpcd "git.sonicoriginal.software/grpcd-protos"
 
-	"git.sonicoriginal.software/grpc-testing/mocks/meter"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"git.sonicoriginal.software/grpcd/internal/storage"
 )
 
-// TestDiscover_Success validates that Discover successfully returns the address for a
-// registered method. This is the happy path ensuring that clients can look up service
-// addresses for methods that have been registered via Register calls.
-func TestDiscover_Success(t *testing.T) {
-	// Setup
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	store := mock.NewStore()
-	server := NewGRPCDServer(log, store, meter)
+const method = "/principal.pb.PrincipalService/GetPrincipal"
 
-	// Seed data: Register a method
-	methodName := "/principal.pb.PrincipalService/GetPrincipal"
-	serviceAddr := "192.168.1.100:50054"
-	err := store.SetMethodAddress(t.Context(), methodName, serviceAddr, 10*time.Minute)
-	if err != nil {
-		t.Fatalf("failed to seed method: %v", err)
-	}
+func TestDiscover(t *testing.T) {
+	t.Run("offers a registered address", func(t *testing.T) {
+		server, store := newServer()
 
-	// Execute
-	req := &grpcd.DiscoverRequest{MethodName: methodName}
-	resp, err := server.Discover(t.Context(), req)
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
 
-	// Assert
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if resp == nil {
-		t.Fatal("expected response, got nil")
-	}
-	if resp.Address != serviceAddr {
-		t.Errorf("expected address %s, got %s", serviceAddr, resp.Address)
-	}
-}
+		stream := satisfiedAfter(t.Context(), method)
 
-// TestDiscover_MethodNotFound validates that Discover returns NotFound error when
-// querying for a method that has not been registered. This allows clients to
-// distinguish between "method doesn't exist" and other error conditions.
-func TestDiscover_MethodNotFound(t *testing.T) {
-	// Setup
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	store := mock.NewStore()
-	server := NewGRPCDServer(log, store, meter)
+		if err := server.Discover(stream); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
 
-	// DO NOT seed any data - method is not registered
+		if got := stream.candidates(); !slices.Equal(got, []string{"10.0.0.1:50054"}) {
+			t.Errorf("expected one candidate, got %v", got)
+		}
+	})
 
-	// Execute
-	req := &grpcd.DiscoverRequest{MethodName: "/nonexistent.Service/Method"}
-	_, err := server.Discover(t.Context(), req)
+	t.Run("offers the next address after one is reported dead", func(t *testing.T) {
+		server, store := newServer()
 
-	// Assert
-	if err == nil {
-		t.Fatal("expected error for method not found, got nil")
-	}
-
-	st, ok := status.FromError(err)
-	if !ok {
-		t.Fatal("expected gRPC status error")
-	}
-	if st.Code() != codes.NotFound {
-		t.Errorf("expected NotFound, got %v", st.Code())
-	}
-}
-
-// TestDiscover_EmptyMethodName validates that Discover returns InvalidArgument when
-// called with an empty method name. This validates that the validation layer properly
-// rejects malformed discover requests.
-func TestDiscover_EmptyMethodName(t *testing.T) {
-	// Setup
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	store := mock.NewStore()
-	server := NewGRPCDServer(log, store, meter)
-
-	// Execute
-	req := &grpcd.DiscoverRequest{MethodName: ""}
-	_, err := server.Discover(t.Context(), req)
-
-	// Assert
-	if err == nil {
-		t.Fatal("expected error for empty method name, got nil")
-	}
-
-	st, ok := status.FromError(err)
-	if !ok {
-		t.Fatal("expected gRPC status error")
-	}
-	if st.Code() != codes.InvalidArgument {
-		t.Errorf("expected InvalidArgument, got %v", st.Code())
-	}
-}
-
-// TestDiscover_InvalidMethodNames validates that Discover returns InvalidArgument for
-// various invalid method name formats. Method name validation is comprehensive in the
-// FuzzRegister_MethodNames test; this test covers key invalid cases for Discover.
-func TestDiscover_InvalidMethodNames(t *testing.T) {
-	tests := []struct {
-		name       string
-		methodName string
-	}{
-		{"not qualified", "GetPrincipal"},
-		{"no leading slash", "service.Service/Method"},
-		{"trailing slash", "/service.Service/Method/"},
-		{"consecutive slashes", "/service.Service//Method"},
-		{"whitespace", "/service.Service/ Method"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Setup
-			log := slog.New(slog.NewTextHandler(io.Discard, nil))
-			meter := meter.New()
-			store := mock.NewStore()
-			server := NewGRPCDServer(log, store, meter)
-
-			// Execute
-			req := &grpcd.DiscoverRequest{MethodName: tt.methodName}
-			_, err := server.Discover(t.Context(), req)
-
-			// Assert
-			if err == nil {
-				t.Fatalf("expected error for invalid method name %q, got nil", tt.methodName)
+		for _, address := range []string{"10.0.0.1:50054", "10.0.0.2:50054"} {
+			if err := store.Add(t.Context(), address, testAnchor, []string{method}); err != nil {
+				t.Fatalf("failed to seed: %v", err)
 			}
+		}
 
-			st, ok := status.FromError(err)
-			if !ok {
-				t.Fatal("expected gRPC status error")
-			}
-			if st.Code() != codes.InvalidArgument {
-				t.Errorf("expected InvalidArgument, got %v", st.Code())
-			}
-		})
-	}
-}
+		stream := satisfiedAfter(t.Context(), method, "10.0.0.1:50054")
 
-// TestDiscover_StorageError validates that Discover returns Internal error when the
-// storage backend fails during lookup. This ensures storage failures are properly
-// surfaced to the caller rather than being misinterpreted as "method not found".
-func TestDiscover_StorageError(t *testing.T) {
-	// Setup
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	store := mock.NewStore()
-	server := NewGRPCDServer(log, store, meter)
+		if err := server.Discover(stream); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
 
-	// Inject storage error BEFORE calling Discover
-	store.SetGetMethodAddressError(errors.New("storage unavailable"))
+		want := []string{"10.0.0.1:50054", "10.0.0.2:50054"}
+		if got := stream.candidates(); !slices.Equal(got, want) {
+			t.Errorf("expected %v, got %v", want, got)
+		}
 
-	// Execute
-	req := &grpcd.DiscoverRequest{MethodName: "/test.Service/Method"}
-	_, err := server.Discover(t.Context(), req)
+		if got := store.Addresses(method); !slices.Equal(got, []string{"10.0.0.2:50054"}) {
+			t.Errorf("expected the dead address to be removed, got %v", got)
+		}
+	})
 
-	// Assert
-	if err == nil {
-		t.Fatal("expected error for storage failure, got nil")
-	}
+	t.Run("reinstates a removal it is told about", func(t *testing.T) {
+		server, store := newServer()
 
-	st, ok := status.FromError(err)
-	if !ok {
-		t.Fatal("expected gRPC status error")
-	}
-	if st.Code() != codes.Internal {
-		t.Errorf("expected Internal, got %v", st.Code())
-	}
-}
+		ctx, disconnect := context.WithCancel(peerContext(t.Context(), "10.0.0.1:41234"))
+		defer disconnect()
 
-// TestDiscover_ExpiredRegistration validates that Discover returns NotFound when
-// attempting to discover a method whose registration has expired. This ensures TTLs
-// are properly enforced and expired registrations are indistinguishable from
-// never-registered methods.
-func TestDiscover_ExpiredRegistration(t *testing.T) {
-	// Setup
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	store := mock.NewStore()
-	server := NewGRPCDServer(log, store, meter)
+		registration := newRegisterStream(ctx)
 
-	// Seed data: Register a method with very short TTL
-	methodName := "/test.Service/Method"
-	serviceAddr := "192.168.1.100:50054"
-	err := store.SetMethodAddress(t.Context(), methodName, serviceAddr, 50*time.Millisecond)
-	if err != nil {
-		t.Fatalf("failed to seed method: %v", err)
-	}
+		held(server, &grpcd.RegisterRequest{Methods: []string{method}, Port: 50054}, registration)
+		await(t, registration.acknowledged(), "registration was never acknowledged")
 
-	// Wait for TTL to expire
-	time.Sleep(100 * time.Millisecond)
+		removals, err := store.Watch(t.Context(), testAnchor)
+		if err != nil {
+			t.Fatalf("failed to watch: %v", err)
+		}
 
-	// Execute
-	req := &grpcd.DiscoverRequest{MethodName: methodName}
-	_, err = server.Discover(t.Context(), req)
+		// A client that cannot reach the address reports it, even though the
+		// service is up and holding its stream.
+		go func() {
+			_ = server.Discover(satisfiedAfter(t.Context(), method, "10.0.0.1:50054"))
+		}()
 
-	// Assert - should return NotFound, not the expired address
-	if err == nil {
-		t.Fatal("expected error for expired registration, got nil")
-	}
+		removal := await(t, removals, "the anchor was never told about the removal")
 
-	st, ok := status.FromError(err)
-	if !ok {
-		t.Fatal("expected gRPC status error")
-	}
-	if st.Code() != codes.NotFound {
-		t.Errorf("expected NotFound for expired registration, got %v", st.Code())
-	}
-}
+		if removal.Method != method || removal.Address != "10.0.0.1:50054" {
+			t.Fatalf("expected the removed row to be named, got %+v", removal)
+		}
 
-// TestDiscover_MultipleServicesLastWins validates that when multiple services register
-// the same method, Discover returns the address from the most recent registration.
-// This implements last-writer-wins semantics consistent with Register behavior.
-func TestDiscover_MultipleServicesLastWins(t *testing.T) {
-	// Setup
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	meter := meter.New()
-	store := mock.NewStore()
-	server := NewGRPCDServer(log, store, meter)
+		server.Reinstate(t.Context(), removal)
 
-	// Seed data: Register same method from two addresses
-	methodName := "/test.Service/Method"
-	addr1 := "192.168.1.100:50054"
-	addr2 := "192.168.1.200:50054"
+		if got := store.Addresses(method); !slices.Equal(got, []string{"10.0.0.1:50054"}) {
+			t.Errorf("expected the address to be written back, got %v", got)
+		}
+	})
 
-	// First registration
-	err := store.SetMethodAddress(t.Context(), methodName, addr1, 10*time.Minute)
-	if err != nil {
-		t.Fatalf("failed to seed first registration: %v", err)
-	}
+	t.Run("reports when reinstating fails", func(t *testing.T) {
+		server, store := newServer()
 
-	// Second registration overwrites first
-	err = store.SetMethodAddress(t.Context(), methodName, addr2, 10*time.Minute)
-	if err != nil {
-		t.Fatalf("failed to seed second registration: %v", err)
-	}
+		store.SetAddError(errors.New("storage unavailable"))
 
-	// Execute
-	req := &grpcd.DiscoverRequest{MethodName: methodName}
-	resp, err := server.Discover(t.Context(), req)
+		server.Reinstate(t.Context(), storage.Removal{Method: method, Address: "10.0.0.1:50054"})
 
-	// Assert - should return second address
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if resp.Address != addr2 {
-		t.Errorf("expected last registered address %s, got %s", addr2, resp.Address)
-	}
+		if got := store.Addresses(method); len(got) != 0 {
+			t.Errorf("expected nothing to be written, got %v", got)
+		}
+	})
+
+	t.Run("refuses a method that is not registered", func(t *testing.T) {
+		server, _ := newServer()
+
+		err := server.Discover(satisfiedAfter(t.Context(), method))
+
+		assertCode(t, err, codes.NotFound)
+	})
+
+	t.Run("refuses a method whose addresses are all reported dead", func(t *testing.T) {
+		server, store := newServer()
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+
+		err := server.Discover(asks(t.Context(), method, "10.0.0.1:50054"))
+
+		assertCode(t, err, codes.NotFound)
+
+		if got := store.Addresses(method); len(got) != 0 {
+			t.Errorf("expected the dead address to be removed, got %v", got)
+		}
+	})
+
+	t.Run("refuses an invalid method name", func(t *testing.T) {
+		server, _ := newServer()
+
+		err := server.Discover(satisfiedAfter(t.Context(), "not-a-method"))
+
+		assertCode(t, err, codes.InvalidArgument)
+	})
+
+	t.Run("returns when the request cannot be read", func(t *testing.T) {
+		server, _ := newServer()
+
+		stream := &discoverStream{
+			ctx:      t.Context(),
+			requests: []recvResult{{err: errors.New("broken transport")}},
+		}
+
+		if err := server.Discover(stream); err == nil {
+			t.Fatal("expected the receive failure to be returned")
+		}
+	})
+
+	t.Run("returns when the store cannot be read", func(t *testing.T) {
+		server, store := newServer()
+
+		store.SetAddressesForError(errors.New("storage unavailable"))
+
+		err := server.Discover(satisfiedAfter(t.Context(), method))
+
+		assertCode(t, err, codes.Internal)
+	})
+
+	t.Run("returns when a candidate cannot be sent", func(t *testing.T) {
+		server, store := newServer()
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+
+		stream := satisfiedAfter(t.Context(), method)
+		stream.sendErr = errors.New("broken transport")
+
+		if err := server.Discover(stream); err == nil {
+			t.Fatal("expected the send failure to be returned")
+		}
+	})
+
+	t.Run("returns when the report cannot be read", func(t *testing.T) {
+		server, store := newServer()
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+
+		stream := asks(t.Context(), method)
+		stream.requests = append(stream.requests, recvResult{err: errors.New("broken transport")})
+
+		if err := server.Discover(stream); err == nil {
+			t.Fatal("expected the receive failure to be returned")
+		}
+	})
+
+	t.Run("ignores a report naming no address", func(t *testing.T) {
+		server, store := newServer()
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+
+		stream := asks(t.Context(), method)
+		stream.requests = append(stream.requests, recvResult{request: &grpcd.DiscoverRequest{}})
+
+		err := server.Discover(stream)
+
+		assertCode(t, err, codes.NotFound)
+
+		if got := store.Addresses(method); !slices.Equal(got, []string{"10.0.0.1:50054"}) {
+			t.Errorf("expected the address to survive, got %v", got)
+		}
+	})
+
+	t.Run("keeps going when a removal fails", func(t *testing.T) {
+		server, store := newServer()
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+
+		store.SetRemoveFromMethodError(errors.New("storage unavailable"))
+
+		err := server.Discover(asks(t.Context(), method, "10.0.0.1:50054"))
+
+		assertCode(t, err, codes.NotFound)
+	})
+
+	t.Run("keeps going when the anchor cannot be told", func(t *testing.T) {
+		server, store := newServer()
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+
+		store.SetNotifyError(errors.New("storage unavailable"))
+
+		err := server.Discover(asks(t.Context(), method, "10.0.0.1:50054"))
+
+		assertCode(t, err, codes.NotFound)
+	})
+
+	t.Run("tells nobody about an address with no anchor", func(t *testing.T) {
+		server, store := newServer()
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", "", []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+
+		err := server.Discover(asks(t.Context(), method, "10.0.0.1:50054"))
+
+		assertCode(t, err, codes.NotFound)
+	})
 }
