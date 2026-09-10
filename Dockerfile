@@ -1,7 +1,7 @@
 ARG build_dir=/go/src
 ARG artifact_name=app
 ARG health_name=grpc_health_probe
-ARG grpc_health_probe_version=v0.4.41
+ARG grpc_health_probe_version=v0.4.57
 ARG module_path=.
 
 FROM golang:alpine AS deps

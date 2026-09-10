@@ -1,8 +1,4 @@
 .git*
-example
 
-go.work
-go.work.sum
-.task
 README.md
 compose.yaml
