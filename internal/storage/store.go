@@ -82,6 +82,14 @@ type Store interface {
 	// removed. It stops when ctx is done.
 	Watch(ctx context.Context, anchor string) (<-chan Removal, error)
 
+	// WatchMethod delivers addresses added to method after the call. It stops
+	// when ctx is done.
+	//
+	// A Discover that has run out of candidates waits on this rather than
+	// answering, so a consumer whose backend is entirely down is woken by the
+	// next registration instead of asking again.
+	WatchMethod(ctx context.Context, method string) (<-chan string, error)
+
 	// Ping checks storage connectivity
 	Ping(ctx context.Context) error
 

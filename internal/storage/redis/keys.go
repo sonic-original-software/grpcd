@@ -16,3 +16,8 @@ func anchorKey(address string) string {
 func channel(anchor string) string {
 	return fmt.Sprintf("removals:%s", anchor)
 }
+
+// additions returns the pub/sub channel a method's new addresses are announced on
+func additions(method string) string {
+	return fmt.Sprintf("additions:%s", method)
+}

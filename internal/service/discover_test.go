@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"testing"
 
@@ -106,28 +107,86 @@ func TestDiscover(t *testing.T) {
 		}
 	})
 
-	t.Run("refuses a method that is not registered", func(t *testing.T) {
-		server, _ := newServer()
+	t.Run("waits for a method that is not registered and offers the first to arrive", func(t *testing.T) {
+		server, store := newServer()
 
-		err := server.Discover(satisfiedAfter(t.Context(), method))
+		stream := satisfiedAfter(t.Context(), method)
 
-		assertCode(t, err, codes.NotFound)
+		returned := discovering(server, stream)
+
+		// Nothing is registered, so the handler is waiting. Only now does a
+		// service register, and the handler is expected to be woken by it.
+		await(t, store.Watching(method), "handler never began waiting")
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to register: %v", err)
+		}
+
+		if err := await(t, returned, "handler did not offer the registration"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := stream.candidates(); !slices.Equal(got, []string{"10.0.0.1:50054"}) {
+			t.Errorf("expected the registered address, got %v", got)
+		}
 	})
 
-	t.Run("refuses a method whose addresses are all reported dead", func(t *testing.T) {
+	t.Run("waits after every address is reported dead and offers the next to arrive", func(t *testing.T) {
 		server, store := newServer()
 
 		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
 			t.Fatalf("failed to seed: %v", err)
 		}
 
-		err := server.Discover(asks(t.Context(), method, "10.0.0.1:50054"))
+		stream := satisfiedAfter(t.Context(), method, "10.0.0.1:50054")
 
-		assertCode(t, err, codes.NotFound)
+		returned := discovering(server, stream)
+
+		await(t, store.Watching(method), "handler never began waiting")
 
 		if got := store.Addresses(method); len(got) != 0 {
-			t.Errorf("expected the dead address to be removed, got %v", got)
+			t.Errorf("expected the dead address to be removed before waiting, got %v", got)
 		}
+
+		if err := store.Add(t.Context(), "10.0.0.2:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to register: %v", err)
+		}
+
+		if err := await(t, returned, "handler did not offer the registration"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		want := []string{"10.0.0.1:50054", "10.0.0.2:50054"}
+		if got := stream.candidates(); !slices.Equal(got, want) {
+			t.Errorf("expected %v, got %v", want, got)
+		}
+	})
+
+	t.Run("returns when the caller goes away while waiting", func(t *testing.T) {
+		server, store := newServer()
+
+		ctx, leave := context.WithCancel(t.Context())
+		defer leave()
+
+		returned := discovering(server, satisfiedAfter(ctx, method))
+
+		await(t, store.Watching(method), "handler never began waiting")
+
+		leave()
+
+		if err := await(t, returned, "handler did not return"); err == nil {
+			t.Fatal("expected the cancellation to be returned")
+		}
+	})
+
+	t.Run("returns when the wait cannot be established", func(t *testing.T) {
+		server, store := newServer()
+
+		store.SetWatchMethodError(errors.New("storage unavailable"))
+
+		err := server.Discover(satisfiedAfter(t.Context(), method))
+
+		assertCode(t, err, codes.Internal)
 	})
 
 	t.Run("refuses an invalid method name", func(t *testing.T) {
@@ -194,59 +253,76 @@ func TestDiscover(t *testing.T) {
 	t.Run("ignores a report naming no address", func(t *testing.T) {
 		server, store := newServer()
 
-		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
-			t.Fatalf("failed to seed: %v", err)
-		}
+		seedTwo(t, store)
 
 		stream := asks(t.Context(), method)
-		stream.requests = append(stream.requests, recvResult{request: &grpcd.DiscoverRequest{}})
+		stream.requests = append(stream.requests,
+			recvResult{request: &grpcd.DiscoverRequest{}},
+			recvResult{err: io.EOF},
+		)
 
-		err := server.Discover(stream)
+		if err := server.Discover(stream); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-		assertCode(t, err, codes.NotFound)
-
-		if got := store.Addresses(method); !slices.Equal(got, []string{"10.0.0.1:50054"}) {
-			t.Errorf("expected the address to survive, got %v", got)
+		want := []string{"10.0.0.1:50054", "10.0.0.2:50054"}
+		if got := store.Addresses(method); !slices.Equal(got, want) {
+			t.Errorf("expected both addresses to survive, got %v", got)
 		}
 	})
 
 	t.Run("keeps going when a removal fails", func(t *testing.T) {
 		server, store := newServer()
 
-		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
-			t.Fatalf("failed to seed: %v", err)
-		}
-
+		seedTwo(t, store)
 		store.SetRemoveFromMethodError(errors.New("storage unavailable"))
 
-		err := server.Discover(asks(t.Context(), method, "10.0.0.1:50054"))
+		stream := satisfiedAfter(t.Context(), method, "10.0.0.1:50054")
 
-		assertCode(t, err, codes.NotFound)
+		if err := server.Discover(stream); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		want := []string{"10.0.0.1:50054", "10.0.0.2:50054"}
+		if got := stream.candidates(); !slices.Equal(got, want) {
+			t.Errorf("expected the next candidate after the failed removal, got %v", got)
+		}
 	})
 
 	t.Run("keeps going when the anchor cannot be told", func(t *testing.T) {
 		server, store := newServer()
 
-		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
-			t.Fatalf("failed to seed: %v", err)
-		}
-
+		seedTwo(t, store)
 		store.SetNotifyError(errors.New("storage unavailable"))
 
-		err := server.Discover(asks(t.Context(), method, "10.0.0.1:50054"))
+		stream := satisfiedAfter(t.Context(), method, "10.0.0.1:50054")
 
-		assertCode(t, err, codes.NotFound)
+		if err := server.Discover(stream); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := stream.candidates(); len(got) != 2 {
+			t.Errorf("expected the next candidate after the failed notify, got %v", got)
+		}
 	})
 
 	t.Run("tells nobody about an address with no anchor", func(t *testing.T) {
 		server, store := newServer()
 
-		if err := store.Add(t.Context(), "10.0.0.1:50054", "", []string{method}); err != nil {
-			t.Fatalf("failed to seed: %v", err)
+		for _, address := range []string{"10.0.0.1:50054", "10.0.0.2:50054"} {
+			if err := store.Add(t.Context(), address, "", []string{method}); err != nil {
+				t.Fatalf("failed to seed: %v", err)
+			}
 		}
 
-		err := server.Discover(asks(t.Context(), method, "10.0.0.1:50054"))
+		stream := satisfiedAfter(t.Context(), method, "10.0.0.1:50054")
 
-		assertCode(t, err, codes.NotFound)
+		if err := server.Discover(stream); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := stream.candidates(); len(got) != 2 {
+			t.Errorf("expected the next candidate, got %v", got)
+		}
 	})
 }

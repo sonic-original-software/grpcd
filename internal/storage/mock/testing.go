@@ -42,6 +42,13 @@ func (s *Store) SetWatchError(err error) {
 	s.watchErr = err
 }
 
+// SetWatchMethodError sets an error to be returned by WatchMethod
+func (s *Store) SetWatchMethodError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.watchMethodErr = err
+}
+
 // SetPingError sets an error to be returned by Ping
 func (s *Store) SetPingError(err error) {
 	s.mu.Lock()

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"testing"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
@@ -18,6 +19,31 @@ import (
 )
 
 const testAnchor = "anchor-under-test"
+
+// discovering runs Discover on its own goroutine and answers with a channel
+// carrying its return value, because a handler that runs out of candidates
+// blocks until a registration arrives or the caller leaves.
+func discovering(server *GRPCDServer, stream *discoverStream) <-chan error {
+	returned := make(chan error, 1)
+
+	go func() { returned <- server.Discover(stream) }()
+
+	return returned
+}
+
+// seedTwo registers two addresses for method, so a test that reports one dead
+// has another to be offered rather than exhausting.
+func seedTwo(t *testing.T, store interface {
+	Add(context.Context, string, string, []string) error
+}) {
+	t.Helper()
+
+	for _, address := range []string{"10.0.0.1:50054", "10.0.0.2:50054"} {
+		if err := store.Add(t.Context(), address, testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+	}
+}
 
 // isValidMethodName checks if a method name is valid according to validation rules
 // This must match the validation logic in internal/validate/common.go

@@ -25,6 +25,14 @@ type Store struct {
 	anchors  map[string]string // address → anchor
 	watchers map[string]chan storage.Removal
 
+	// methodWatchers holds every Discover waiting for a method to gain an
+	// address. Several can wait on one method, so it is a set of channels.
+	methodWatchers map[string]map[chan string]bool
+
+	// watching is closed per method once something is waiting on it, so a test
+	// can add an address after the wait has begun rather than before.
+	watching map[string]chan struct{}
+
 	// Error injection for testing
 	addErr              error
 	removeErr           error
@@ -32,19 +40,23 @@ type Store struct {
 	addressesForErr     error
 	notifyErr           error
 	watchErr            error
+	watchMethodErr      error
 	pingErr             error
 }
 
 // NewStore creates a new in-memory store
 func NewStore() *Store {
 	return &Store{
-		methods:  make(map[string]set),
-		anchors:  make(map[string]string),
-		watchers: make(map[string]chan storage.Removal),
+		methods:        make(map[string]set),
+		anchors:        make(map[string]string),
+		watchers:       make(map[string]chan storage.Removal),
+		methodWatchers: make(map[string]map[chan string]bool),
+		watching:       make(map[string]chan struct{}),
 	}
 }
 
-// Add records that address serves each of methods, anchored to anchor.
+// Add records that address serves each of methods, anchored to anchor, and
+// announces the address to anything waiting on those methods.
 func (s *Store) Add(_ context.Context, address, anchor string, methods []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -59,6 +71,15 @@ func (s *Store) Add(_ context.Context, address, anchor string, methods []string)
 		}
 
 		s.methods[method][address] = true
+
+		// Fire and forget, as Pub/Sub is: a watcher that is not ready to
+		// receive misses it.
+		for watcher := range s.methodWatchers[method] {
+			select {
+			case watcher <- address:
+			default:
+			}
+		}
 	}
 
 	s.anchors[address] = anchor
@@ -174,6 +195,64 @@ func (s *Store) Watch(ctx context.Context, anchor string) (<-chan storage.Remova
 	}()
 
 	return watcher, nil
+}
+
+// WatchMethod delivers addresses added to method after the call.
+func (s *Store) WatchMethod(ctx context.Context, method string) (<-chan string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.watchMethodErr != nil {
+		return nil, s.watchMethodErr
+	}
+
+	// Buffered by one so Add never blocks on a watcher that is between reads.
+	watcher := make(chan string, 1)
+
+	if s.methodWatchers[method] == nil {
+		s.methodWatchers[method] = make(map[chan string]bool)
+	}
+
+	s.methodWatchers[method][watcher] = true
+
+	if signal, waited := s.watching[method]; waited {
+		close(signal)
+		delete(s.watching, method)
+	}
+
+	go func() {
+		<-ctx.Done()
+
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		// Removed from the set before closing, under the same lock Add
+		// iterates under, so nothing can send on it afterwards.
+		delete(s.methodWatchers[method], watcher)
+		close(watcher)
+	}()
+
+	return watcher, nil
+}
+
+// Watching answers with a channel closed once something is waiting on method.
+// A test that wants to add an address after a Discover has begun waiting, rather
+// than before, blocks on this first.
+func (s *Store) Watching(method string) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	signal := make(chan struct{})
+
+	if len(s.methodWatchers[method]) > 0 {
+		close(signal)
+
+		return signal
+	}
+
+	s.watching[method] = signal
+
+	return signal
 }
 
 // Addresses answers with the addresses serving method, for assertions.

@@ -5,6 +5,8 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/redis/go-redis/v9"
+
 	"git.sonicoriginal.software/grpcd/internal/storage"
 )
 
@@ -20,6 +22,18 @@ func (r *Store) Add(ctx context.Context, address, anchor string, methods []strin
 	}
 
 	pipe.Set(ctx, anchorKey(address), anchor, 0)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return err
+	}
+
+	// Announced after the write lands, so a waiting Discover that is woken by
+	// this finds the address in the set when it looks.
+	pipe = r.client.Pipeline()
+
+	for _, method := range methods {
+		pipe.Publish(ctx, additions(method), address)
+	}
 
 	_, err := pipe.Exec(ctx)
 
@@ -104,31 +118,56 @@ func (r *Store) Notify(ctx context.Context, anchor string, removal storage.Remov
 // Subscribe registers the channel before returning, so a removal published
 // after this call reaches the caller.
 func (r *Store) Watch(ctx context.Context, anchor string) (<-chan storage.Removal, error) {
-	subscription := r.client.Subscribe(ctx, channel(anchor))
+	return subscribe(ctx, r.client, channel(anchor), func(payload string) (storage.Removal, bool) {
+		method, address, found := strings.Cut(payload, " ")
+
+		return storage.Removal{Method: method, Address: address}, found
+	})
+}
+
+// WatchMethod delivers addresses added to method after the call.
+func (r *Store) WatchMethod(ctx context.Context, method string) (<-chan string, error) {
+	return subscribe(ctx, r.client, additions(method), func(payload string) (string, bool) {
+		return payload, true
+	})
+}
+
+// subscribe holds a subscription to name for as long as ctx lives, decoding
+// each payload with decode and delivering what it accepts.
+//
+// Subscribe registers the channel before returning, so a message published
+// after this call reaches the caller.
+func subscribe[T any](
+	ctx context.Context,
+	client *redis.Client,
+	name string,
+	decode func(string) (T, bool),
+) (<-chan T, error) {
+	subscription := client.Subscribe(ctx, name)
 
 	if _, err := subscription.Receive(ctx); err != nil {
 		return nil, err
 	}
 
-	removals := make(chan storage.Removal)
+	delivered := make(chan T)
 
 	go func() {
-		defer close(removals)
+		defer close(delivered)
 		defer subscription.Close()
 
 		for message := range subscription.Channel() {
-			method, address, found := strings.Cut(message.Payload, " ")
-			if !found {
+			value, ok := decode(message.Payload)
+			if !ok {
 				continue
 			}
 
 			select {
-			case removals <- storage.Removal{Method: method, Address: address}:
+			case delivered <- value:
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 
-	return removals, nil
+	return delivered, nil
 }

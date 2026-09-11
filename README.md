@@ -158,7 +158,7 @@ refer to the
 | RPC        | Implementation                 | Notes                                                                 |
 | ---------- | ------------------------------ | --------------------------------------------------------------------- |
 | `Register` | `internal/service/register.go` | Holds the stream; writes the rows on open and removes them on its end |
-| `Discover` | `internal/service/discover.go` | Offers one candidate at a time; `NOT_FOUND` once they are exhausted   |
+| `Discover` | `internal/service/discover.go` | Offers one candidate at a time; waits for a registration once exhausted |
 
 There is no `Deregister`. Closing the registration stream is what removes the
 rows, so a caller that crashes and one that exits cleanly take the same path.
