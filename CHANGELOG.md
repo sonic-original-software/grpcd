@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## 0.5.0 - 2026-09-12
+#### Features
+- draw candidates at random, add Watch, and wait out a lost store - (537a56e) - Nathan Blair
+
+- - -
+
 ## 0.4.0 - 2026-09-11
 #### Features
 - subscribe to more more methods when exhausted - (1107b01) - Nathan Blair
