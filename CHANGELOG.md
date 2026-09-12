@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## 0.6.0 - 2026-09-12
+#### Features
+- re-release under new org and module - (9d6ffd3) - Nathan Blair
+
+- - -
+
 ## 0.5.1 - 2026-09-12
 #### Bug Fixes
 - version bumps - (adc9a8f) - Nathan Blair
