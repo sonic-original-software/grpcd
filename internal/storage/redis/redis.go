@@ -4,7 +4,7 @@ package redis
 import (
 	"github.com/redis/go-redis/v9"
 
-	"git.sonicoriginal.software/grpcd/internal/storage"
+	"github.com/grpcd/server/internal/storage"
 )
 
 // Store implements Store using Redis as the backend

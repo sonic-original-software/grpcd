@@ -20,13 +20,13 @@ import (
 
 	foundationotel "git.sonicoriginal.software/grpc-foundation/otel"
 	foundation "git.sonicoriginal.software/grpc-foundation/server"
-	"git.sonicoriginal.software/grpcd-go/diagnostics"
-	service_lib "git.sonicoriginal.software/grpcd-go/service"
-	grpcd "git.sonicoriginal.software/grpcd-protos"
+	"git.sonicoriginal.software/grpc-service/diagnostics"
+	service_lib "git.sonicoriginal.software/grpc-service/service"
+	grpcd "github.com/grpcd/protos"
 
-	"git.sonicoriginal.software/grpcd/internal/service"
-	"git.sonicoriginal.software/grpcd/internal/storage"
-	"git.sonicoriginal.software/grpcd/internal/storage/resolver"
+	"github.com/grpcd/server/internal/service"
+	"github.com/grpcd/server/internal/storage"
+	"github.com/grpcd/server/internal/storage/resolver"
 )
 
 // defaultServerName identifies this server when GRPC_SERVER_NAME is unset

@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
-	grpcd "git.sonicoriginal.software/grpcd-protos"
+	grpcd "github.com/grpcd/protos"
 )
 
 // watchStream stands in for a held Watch stream and records what it was told.

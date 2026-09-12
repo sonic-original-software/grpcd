@@ -13,9 +13,9 @@ import (
 
 	"git.sonicoriginal.software/grpc-testing/mocks/addr"
 	"git.sonicoriginal.software/grpc-testing/mocks/meter"
-	grpcd "git.sonicoriginal.software/grpcd-protos"
+	grpcd "github.com/grpcd/protos"
 
-	"git.sonicoriginal.software/grpcd/internal/storage/mock"
+	"github.com/grpcd/server/internal/storage/mock"
 )
 
 const testAnchor = "anchor-under-test"

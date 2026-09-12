@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync"
 
-	"git.sonicoriginal.software/grpcd/internal/storage"
+	"github.com/grpcd/server/internal/storage"
 )
 
 // set stores a set of strings
@@ -66,9 +66,9 @@ type Store struct {
 // NewStore creates a new in-memory store
 func NewStore() *Store {
 	return &Store{
-		methods:   make(map[string]set),
-		anchors:   make(map[string]string),
-		watchers:  make(map[string]chan storage.Removal),
+		methods:    make(map[string]set),
+		anchors:    make(map[string]string),
+		watchers:   make(map[string]chan storage.Removal),
 		additions:  storage.NewAdditions(),
 		conditions: storage.NewConditions(),
 		exhausted:  make(map[string]chan struct{}),

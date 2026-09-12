@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 
-	"git.sonicoriginal.software/grpcd/internal/storage"
+	"github.com/grpcd/server/internal/storage"
 )
 
 // storeLost reports whether a failed operation is the store being lost, and if

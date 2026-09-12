@@ -7,7 +7,7 @@ import (
 
 	"git.sonicoriginal.software/grpc-testing/mocks/meter"
 
-	"git.sonicoriginal.software/grpcd/internal/storage/mock"
+	"github.com/grpcd/server/internal/storage/mock"
 )
 
 func TestNewGRPCDServer(t *testing.T) {

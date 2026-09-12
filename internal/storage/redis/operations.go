@@ -8,7 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"git.sonicoriginal.software/grpcd/internal/storage"
+	"github.com/grpcd/server/internal/storage"
 )
 
 // Add records that address serves each of methods, anchored to anchor.

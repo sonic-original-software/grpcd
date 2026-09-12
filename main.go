@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"git.sonicoriginal.software/grpcd/internal/cli"
+	"github.com/grpcd/server/internal/cli"
 )
 
 func main() { os.Exit(cli.Run()) }

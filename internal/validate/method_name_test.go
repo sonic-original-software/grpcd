@@ -6,73 +6,73 @@ import (
 
 func TestMethodName(t *testing.T) {
 	tests := []struct {
-		name           string
-		methodName     string
+		name            string
+		methodName      string
 		expectViolation bool
 	}{
 		{
-			name:           "valid gRPC method",
-			methodName:     "/package.Service/Method",
+			name:            "valid gRPC method",
+			methodName:      "/package.Service/Method",
 			expectViolation: false,
 		},
 		{
-			name:           "valid short gRPC method",
-			methodName:     "/Service/Method",
+			name:            "valid short gRPC method",
+			methodName:      "/Service/Method",
 			expectViolation: false,
 		},
 		{
-			name:           "empty method name",
-			methodName:     "",
+			name:            "empty method name",
+			methodName:      "",
 			expectViolation: true,
 		},
 		{
-			name:           "method with leading whitespace",
-			methodName:     " /package.Service/Method",
+			name:            "method with leading whitespace",
+			methodName:      " /package.Service/Method",
 			expectViolation: true,
 		},
 		{
-			name:           "method with trailing whitespace",
-			methodName:     "/package.Service/Method ",
+			name:            "method with trailing whitespace",
+			methodName:      "/package.Service/Method ",
 			expectViolation: true,
 		},
 		{
-			name:           "method with internal whitespace",
-			methodName:     "/package.Service/ Method",
+			name:            "method with internal whitespace",
+			methodName:      "/package.Service/ Method",
 			expectViolation: true,
 		},
 		{
-			name:           "method without leading slash",
-			methodName:     "package.Service/Method",
+			name:            "method without leading slash",
+			methodName:      "package.Service/Method",
 			expectViolation: true,
 		},
 		{
-			name:           "method with consecutive slashes",
-			methodName:     "/package.Service//Method",
+			name:            "method with consecutive slashes",
+			methodName:      "/package.Service//Method",
 			expectViolation: true,
 		},
 		{
-			name:           "method ending with slash",
-			methodName:     "/package.Service/Method/",
+			name:            "method ending with slash",
+			methodName:      "/package.Service/Method/",
 			expectViolation: true,
 		},
 		{
-			name:           "method without method separator",
-			methodName:     "/package.Service",
+			name:            "method without method separator",
+			methodName:      "/package.Service",
 			expectViolation: true,
 		},
 		{
-			name:           "old dot format without leading slash",
-			methodName:     "package.Service.Method",
+			name:            "old dot format without leading slash",
+			methodName:      "package.Service.Method",
 			expectViolation: true,
 		},
 		{
-			name:           "old dot format with leading slash but no slash separator",
-			methodName:     "/package.Service.Method",
+			name:            "old dot format with leading slash but no slash separator",
+			methodName:      "/package.Service.Method",
 			expectViolation: true,
 		},
 		{
-			name:           "dots in method name after slash",
-			methodName:     "/package.Service/Method.Name",
+			name:            "dots in method name after slash",
+			methodName:      "/package.Service/Method.Name",
 			expectViolation: false, // dots are technically valid in identifiers
 		},
 	}

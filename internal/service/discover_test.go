@@ -9,9 +9,9 @@ import (
 
 	"google.golang.org/grpc/codes"
 
-	grpcd "git.sonicoriginal.software/grpcd-protos"
+	grpcd "github.com/grpcd/protos"
 
-	"git.sonicoriginal.software/grpcd/internal/storage"
+	"github.com/grpcd/server/internal/storage"
 )
 
 const method = "/package.Service/Method"

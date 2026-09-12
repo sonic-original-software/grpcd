@@ -1,130 +1,42 @@
-# grpcd
+# grpcd server
 
-**Reference server implementation of the gRPC Method Discovery (grpcd) service**
+The grpcd server. It answers the three RPCs in
+[grpcd/protos](https://github.com/grpcd/protos), holds the streams that are
+registrations, and keeps the rows in a storage backend shared by every instance
+in a region.
 
-This is the canonical Go implementation of the grpcd service as defined in
-[grpcd-protos](https://github.com/sonic-original-software/grpcd-protos).
-
-For details on what gRPC Method Discovery is, its architecture, and use cases,
-see the
-[grpcd-protos documentation](https://github.com/sonic-original-software/grpcd-protos).
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Implementation](#implementation)
-- [Storage Backends](#storage-backends)
-- [Development](#development)
-
-## Overview
-
-This implementation demonstrates production-ready patterns for building
-stateless, horizontally-scalable gRPC services with pluggable storage backends.
-
-Production-ready container images are published to
-[`ghcr.io/sonic-original-software/grpcd`](https://github.com/sonic-original-software/grpcd/pkgs/container/grpcd)
-for easy deployment.
-
-### Implementation Features
-
-- **Production Ready**: Pre-built container images, OpenTelemetry metrics,
-  structured logging, health checks
-- **Pluggable Storage**: Abstract storage interface with Redis and in-memory
-  implementations
-- **Peer Context Security**: Extracts real client addresses from gRPC peer
-  context to prevent spoofing
-- **Docker Native**: Multi-stage builds, scratch-based images, Docker Compose
-  support
+Container images are published to `ghcr.io/grpcd/server`.
 
 ## Quick Start
 
-### Using the Pre-built Container Image
-
-Ready-to-use container images are available at
-[]`ghcr.io/sonic-original-software/grpcd`](https://github.com/sonic-original-software/grpcd/pkgs/container/grpcd).
-
 ```bash
-# Run with in-memory storage (development/testing)
-docker run -p 5000:5000 ghcr.io/sonic-original-software/grpcd:latest
+# In-memory storage (development)
+docker run -p 5000:5000 ghcr.io/grpcd/server:latest
 
-# Run with Redis (production)
+# Redis (production)
 docker run -p 5000:5000 \
+  -e GRPC_MAX_CONNECTION_AGE=0 \
   -e STORAGE_BACKEND=redis \
   -e STORAGE_ADDRESS=redis:6379 \
-  ghcr.io/sonic-original-software/grpcd:latest
-```
-
-This is the recommended way to deploy grpcd in production environments.
-
-### Using Docker Compose
-
-The easiest way to run grpcd locally with Redis:
-
-```bash
-docker compose up
-```
-
-This starts:
-
-- Redis on port 6379
-- grpcd on port 53001 (mapped to internal port 5000)
-
-### Building from Source
-
-Requirements:
-
-- Go 1.25.3 or later
-- Redis (optional, for persistent storage)
-
-```bash
-# Clone the repository
-git clone https://github.com/sonic-original-software/grpcd
-cd grpcd
-
-# Download dependencies
-go mod download
-
-# Build
-go build -o grpcd .
-
-# Run with in-memory storage
-./grpcd
-
-# Run with Redis storage
-STORAGE_BACKEND=redis STORAGE_ADDRESS=localhost:6379 ./grpcd
+  ghcr.io/grpcd/server:latest
 ```
 
 ## Configuration
 
-grpcd is configured entirely through environment variables.
+Everything is an environment variable.
 
-### Server Configuration
+| Variable                  | Description                                              | Default |
+| ------------------------- | -------------------------------------------------------- | ------- |
+| `GRPC_SERVER_ADDRESS`     | Address to bind                                          | `:5000` |
+| `GRPC_MAX_CONNECTION_AGE` | Age at which the server sends a GOAWAY. `0` is no limit. | `10m`   |
+| `STORAGE_BACKEND`         | `redis`, or empty for in-memory                          | -       |
+| `STORAGE_ADDRESS`         | Storage backend address. Required for `redis`.           | -       |
 
-| Variable                  | Description                                                  | Default |
-| ------------------------- | ------------------------------------------------------------ | ------- |
-| `GRPC_SERVER_ADDRESS`     | Address to bind the gRPC server                              | `:5000` |
-| `GRPC_MAX_CONNECTION_AGE` | Age at which the server sends a GOAWAY. `0` is no limit.     | `10m`   |
-
-Set `GRPC_MAX_CONNECTION_AGE=0`.
-
-A registration lives as long as the stream holding it, and a GOAWAY ends that
-stream whether or not it is active. At the ten minute default, every
-registration in the mesh is torn down and rebuilt on that timer. It works, and
-it looks healthy, while costing a reconnect per service per interval.
-
-grpcd reports the value in effect at startup.
-
-### Storage Configuration
-
-| Variable          | Description                                           | Default | Required             |
-| ----------------- | ----------------------------------------------------- | ------- | -------------------- |
-| `STORAGE_BACKEND` | Storage backend type (`redis` or empty for in-memory) | -       | No                   |
-| `STORAGE_ADDRESS` | Storage backend address (format depends on backend)   | -       | Yes (if using Redis) |
-
-A registration lives as long as the stream that made it, so nothing configures
-how long one lasts.
+Set `GRPC_MAX_CONNECTION_AGE=0`. A registration lives as long as the stream
+holding it, and a GOAWAY ends that stream whether or not it is active. At the
+ten minute default, every registration in the mesh is torn down and rebuilt on
+that timer. It works, and it looks healthy, while costing a reconnect per
+service per interval. The server reports the value in effect at startup.
 
 ### Health
 
@@ -133,170 +45,176 @@ The health service answers for two entries. `""` says the process is alive.
 `NOT_SERVING` from the first operation that fails against the store until the
 store's subscription comes back, and `SERVING` otherwise.
 
-A balancer or orchestrator probe that should route around an instance that
-has lost its store asks for `grpcd.GRPCDService`. A probe that asks for `""`
-sees only whether the process is up.
+A balancer or orchestrator probe that should route around an instance that has
+lost its store asks for `grpcd.GRPCDService`. A probe that asks for `""` sees
+only whether the process is up.
 
-While the store is lost the instance keeps serving: handlers hold what they
-have and wait for the store rather than failing, and when it returns every
-held registration writes its rows again. Pulling the instance from rotation,
-or restarting it, is whoever probes it deciding to; nothing here does either.
+## Design
 
-### Example Configurations
+### State lives in the storage backend
 
-**Development (in-memory storage)**:
+Every fact the server serves is in the storage backend, so any instance answers
+any lookup and a replacement instance serves immediately. An instance
+additionally holds the registration streams it accepted, which is what ties a
+row's lifetime to its service's.
 
-```bash
-export GRPC_SERVER_ADDRESS=:5000
-export GRPC_MAX_CONNECTION_AGE=0
-# No STORAGE_BACKEND set = in-memory storage
+```
+┌────────────────────────────────────────┐
+│              grpcd server              │
+│                                        │
+│   ┌──────────────────────────────┐     │
+│   │     Service Layer            │     │
+│   │  • Register (held stream)    │     │
+│   │  • Discover (bidirectional)  │     │
+│   │  • Watch (held stream)       │     │
+│   │  • Validation                │     │
+│   └──────────┬───────────────────┘     │
+│              │                         │
+│   ┌──────────▼───────────────────┐     │
+│   │   Storage Interface          │     │
+│   └──────────┬───────────────────┘     │
+│              │                         │
+└──────────────┼─────────────────────────┘
+               │
+     ┌─────────┴─────────┐
+     │                   │
+ ┌───▼────┐      ┌───────▼────┐
+ │ Redis  │      │    Mock    │
+ │Backend │      │  (Testing) │
+ └────────┘      └────────────┘
 ```
 
-**Production (Redis storage)**:
+The backend owns persistence and replication. Embedded storage would need Raft
+for HA; in-memory with peer sync would need gossip and reconciliation; a direct
+Redis dependency would be untestable without Redis. The interface keeps the
+server to the business logic and leaves storage HA to whoever runs the store.
 
-```bash
-export GRPC_SERVER_ADDRESS=:5000
-export GRPC_MAX_CONNECTION_AGE=0
-export STORAGE_BACKEND=redis
-export STORAGE_ADDRESS=redis.prod.example.com:6379
-```
+### Data model
 
-## Implementation
+Two mappings, neither with an expiry:
 
-This server implements the
-[GRPCDService](https://github.com/sonic-original-software/grpcd-protos) defined
-in grpcd-protos. For the complete API specification and protobuf definitions,
-refer to the
-[grpcd-protos repository](https://github.com/sonic-original-software/grpcd-protos).
+- **method → addresses.** Key: the method name. Value: the set of addresses.
+  Read by `Discover`; its cardinality is the `N` a `Watch` draws against.
+- **address → anchor.** Key: the address. Value: the id of the instance holding
+  that address's `Register` stream. Read to address the notification when a row
+  is removed.
 
-### RPC Implementations
+An instance generates a UUIDv4 at startup and uses it as its anchor id and as
+its notification channel. The id names a channel that lives and dies with the
+process, so it needs no coordination and no durability.
 
-| RPC        | Implementation                 | Notes                                                                 |
-| ---------- | ------------------------------ | --------------------------------------------------------------------- |
-| `Register` | `internal/service/register.go` | Holds the stream; writes the rows on open and removes them on its end |
-| `Discover` | `internal/service/discover.go` | Offers one candidate at a time, drawn at random; waits for a registration once exhausted |
-| `Watch`    | `internal/service/watch.go`    | Holds the stream; tells a 1/N share of holders when a new address registers |
+### Registration
 
-There is no `Deregister`. Closing the registration stream is what removes the
-rows, so a caller that crashes and one that exits cleanly take the same path.
+`internal/service/register.go`. The handler validates the request, reads the
+IP off the peer, composes the address, writes one row per method plus the
+anchor, sends the acknowledgement, and blocks on the stream. When the stream
+ends it removes every row the request named. The handler holds that list for
+the life of the stream, so no reverse mapping is stored.
 
-The server also implements standard diagnostic services defined in
-`grpc-protos`:
+### Discovery
 
-- **Info Service**: `internal/service/get_info.go`
-- **Diagnostics Service**: `internal/service/get_diagnostics.go`
+`internal/service/discover.go`. `AddressesFor` on the store is a sequence, and
+each pull is one uniform random draw over the set as it is at that moment, so
+a lookup costs O(1) per candidate however many addresses the method has and a
+removed address is never drawn again. The sequence ends when the set is empty,
+and the handler then waits for the next addition announced for the method.
 
-### Security Implementation
+### Rebalancing
 
-This implementation uses gRPC peer context to extract the caller's IP during
-`Register`. The peer context contains TCP connection metadata that cannot be
-spoofed, preventing address hijacking.
+`internal/service/watch.go`. The handler sleeps until an addition is announced.
+On one for its method whose address differs from the one held, it draws with
+probability `1/N` and sends the new address only if it wins. Two additions back
+to back can cost one missed rebalance, which the next addition corrects; the
+store's set is the truth throughout.
 
-The port comes from the caller, read from its own listener, because the peer
-socket carries only the ephemeral port it dialed from. See
-`internal/service/register.go` for how the two halves are composed.
+### Notifications
+
+Every registration is announced once per instance, over one subscription to
+the storage backend, and every handler waiting on that instance is woken by
+that one announcement. Each woken handler reads the store to learn whether the
+registration concerned it. No instance holds a list of who is waiting for what.
+
+Instances also notify each other about removals, over the backend's
+publish/subscribe, addressed to a single anchor.
+
+### Reverting a wrong removal
+
+The instance anchoring an address is notified when that row is removed and
+writes it back. Its open `Register` stream is live proof the service is up, so
+it performs no check of its own. `grpcd.removals.reverted.total` counts these,
+so a client with a persistent local fault surfaces in monitoring.
+
+### Losing the storage backend
+
+`internal/service/outage.go`. An instance that cannot reach the backend can
+neither record a registration nor answer a lookup, and is deaf to additions. It
+keeps serving and reports `grpcd.GRPCDService` as `NOT_SERVING` until the
+backend's subscription comes back.
+
+The streams it holds are kept. A handler that fails against the backend waits
+for it to return and carries on: a registration is written once it can be, a
+lookup draws again, a watch resumes. A client already on the instance sees a
+call take longer and nothing else.
+
+When the backend returns, every held registration writes its rows again from
+the request the handler still holds, so a backend that came back empty is
+repopulated by the instances themselves. Waiting lookups draw again, since the
+backend may hold registrations the instance was deaf to.
+
+## Failure Modes
+
+**Service crash.** Its `Register` stream ends and its address is removed at
+once. Clients holding a connection to it see that connection break and
+rediscover.
+
+**Instance crash.** Its rows remain, because removal happens when an instance
+observes a stream ending and this one is gone; live services stay discoverable
+throughout. Its registration streams break, and each service reconnects to
+another instance and re-registers: the same rows, written again, with the
+anchor overwritten by the new instance's id. Until that lands, those rows carry
+the id of a channel nobody reads, so a wrong `dead_address` report in that
+window drops a live service until it re-registers.
+
+**Service and its anchoring instance crash together.** Nothing runs the
+removal, so the row remains. The first client to discover that address fails
+against it and reports it, which removes it.
+
+**Storage backend failure.** Covered under Design. Services and clients continue
+on the connections they already hold.
 
 ## Storage Backends
 
-grpcd uses an [abstract storage interface](internal/storage/store.go) that
-supports multiple backends.
+`internal/storage/store.go` is the interface. Adding a backend means
+implementing it and adding a case to `internal/storage/resolver/resolve.go`.
 
-Nothing takes a TTL. `AddressesFor` returns a sequence rather than a slice, and
-each pull is one uniform random draw over the set as it is at that moment, so a
-lookup costs O(1) per candidate however many addresses the method has and a
-removed address is never drawn again. The sequence ends when the set is empty.
+**In-memory** (`internal/storage/mock/`). Selected when `STORAGE_BACKEND` is
+unset. No external dependency; state is lost on restart, and instances do not
+share it.
 
-### Available Backends
+**Redis** (`internal/storage/redis/`). The production backend. Sets hold the
+method rows, and publish/subscribe carries the addition announcements and the
+removal notifications. Instances share state, and Sentinel or Cluster supply
+HA.
 
-#### In-Memory (Mock)
+## Observability
 
-**Use Case**: Development, testing, single-instance deployments
+Counters, exported over OpenTelemetry:
 
-**Characteristics**:
+- `grpcd.registrations.total`
+- `grpcd.removals.total`
+- `grpcd.discoveries.total`
+- `grpcd.removals.reverted.total`
+- `grpcd.rebalances.total`
 
-- No external dependencies
-- Data lost on restart
-- Not suitable for production multi-instance deployments
-- Automatically selected when `STORAGE_BACKEND` is not set
-
-**Implementation**: `internal/storage/mock/`
-
-#### Redis
-
-**Use Case**: Production deployments
-
-**Characteristics**:
-
-- Persistent storage with optional persistence to disk
-- Publish/subscribe, which is how an instance is told a row it anchors was
-  removed, and how one subscription per instance wakes every `Discover`
-  waiting on a registration
-- Horizontal scaling support (all grpcd instances share state)
-- High availability with Redis Sentinel or Redis Cluster
-
-**Configuration**:
-
-```bash
-STORAGE_BACKEND=redis
-STORAGE_ADDRESS=redis-host:6379
-```
-
-**Implementation**: `internal/storage/redis/`
-
-### Adding a New Backend
-
-1. Implement the `Store` interface
-2. Add resolver logic in `internal/storage/resolver/resolve.go`
+The info and diagnostics services from
+[grpc-service](https://github.com/sonic-original-software/grpc-service) report
+the version and the store's connectivity.
 
 ## Development
 
-### Project Structure
-
-### Running Tests
-
 ```bash
-# Run all tests
 go test ./...
-
-# Run with coverage
-go test -cover ./...
-
-# Run specific package tests
-go test ./internal/service/...
-
-# Run fuzz tests
 go test -fuzz=FuzzRegister ./internal/service
 go test -fuzz=FuzzDiscover ./internal/service
-```
-
-### Building
-
-```bash
-# Standard build
-go build -o grpcd .
-
-# Optimized build (same as Dockerfile)
 CGO_ENABLED=0 go build -ldflags="-w -s" -o grpcd .
 ```
-
-### Code Quality
-
-The codebase includes:
-
-- Unit tests for all RPC methods
-- Fuzz tests for request validation
-- Structured logging with contextual information
-- OpenTelemetry metrics for monitoring
-- Input validation and error handling
-
-## Related Projects
-
-- [grpcd-protos](https://github.com/sonic-original-software/grpcd-protos):
-  Protocol buffer definitions and service specification
-- [grpcd-go](https://git.sonicoriginal.software/grpcd-go): Go client library for
-  gRPC Method Discovery
-
-## Contributing
-
-Contributions welcome! This is the reference implementation, so changes should
-align with the grpcd specification in grpcd-protos.

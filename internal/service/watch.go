@@ -4,10 +4,10 @@ import (
 	"git.sonicoriginal.software/logger"
 
 	"git.sonicoriginal.software/grpc-foundation/errors"
-	grpcd "git.sonicoriginal.software/grpcd-protos"
+	grpcd "github.com/grpcd/protos"
 
-	"git.sonicoriginal.software/grpcd/internal"
-	"git.sonicoriginal.software/grpcd/internal/validate"
+	"github.com/grpcd/server/internal"
+	"github.com/grpcd/server/internal/validate"
 )
 
 const (

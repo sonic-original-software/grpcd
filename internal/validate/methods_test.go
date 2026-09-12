@@ -6,85 +6,85 @@ import (
 
 func TestMethods(t *testing.T) {
 	tests := []struct {
-		name           string
-		methods        []string
+		name            string
+		methods         []string
 		expectViolation bool
-		expectedField  string
+		expectedField   string
 	}{
 		{
-			name:           "empty list",
-			methods:        []string{},
+			name:            "empty list",
+			methods:         []string{},
 			expectViolation: true,
-			expectedField:  "methods",
+			expectedField:   "methods",
 		},
 		{
-			name:           "nil list",
-			methods:        nil,
+			name:            "nil list",
+			methods:         nil,
 			expectViolation: true,
-			expectedField:  "methods",
+			expectedField:   "methods",
 		},
 		{
-			name:           "valid single method",
-			methods:        []string{"/package.Service/Method"},
+			name:            "valid single method",
+			methods:         []string{"/package.Service/Method"},
 			expectViolation: false,
 		},
 		{
-			name:           "valid multiple methods",
-			methods:        []string{"/package.Service/Method", "/package.Service/Other"},
+			name:            "valid multiple methods",
+			methods:         []string{"/package.Service/Method", "/package.Service/Other"},
 			expectViolation: false,
 		},
 		{
-			name:           "valid short method",
-			methods:        []string{"/Service/Method"},
+			name:            "valid short method",
+			methods:         []string{"/Service/Method"},
 			expectViolation: false,
 		},
 		{
-			name:           "empty method name",
-			methods:        []string{""},
+			name:            "empty method name",
+			methods:         []string{""},
 			expectViolation: true,
-			expectedField:  "methods[0]",
+			expectedField:   "methods[0]",
 		},
 		{
-			name:           "method with leading whitespace",
-			methods:        []string{" /package.Service/Method"},
+			name:            "method with leading whitespace",
+			methods:         []string{" /package.Service/Method"},
 			expectViolation: true,
-			expectedField:  "methods[0]",
+			expectedField:   "methods[0]",
 		},
 		{
-			name:           "method with trailing whitespace",
-			methods:        []string{"/package.Service/Method "},
+			name:            "method with trailing whitespace",
+			methods:         []string{"/package.Service/Method "},
 			expectViolation: true,
-			expectedField:  "methods[0]",
+			expectedField:   "methods[0]",
 		},
 		{
-			name:           "method without leading slash",
-			methods:        []string{"package.Service/Method"},
+			name:            "method without leading slash",
+			methods:         []string{"package.Service/Method"},
 			expectViolation: true,
-			expectedField:  "methods[0]",
+			expectedField:   "methods[0]",
 		},
 		{
-			name:           "method with consecutive slashes",
-			methods:        []string{"/package.Service//Method"},
+			name:            "method with consecutive slashes",
+			methods:         []string{"/package.Service//Method"},
 			expectViolation: true,
-			expectedField:  "methods[0]",
+			expectedField:   "methods[0]",
 		},
 		{
-			name:           "method ending with slash",
-			methods:        []string{"/package.Service/Method/"},
+			name:            "method ending with slash",
+			methods:         []string{"/package.Service/Method/"},
 			expectViolation: true,
-			expectedField:  "methods[0]",
+			expectedField:   "methods[0]",
 		},
 		{
-			name:           "method without method separator",
-			methods:        []string{"/package.Service"},
+			name:            "method without method separator",
+			methods:         []string{"/package.Service"},
 			expectViolation: true,
-			expectedField:  "methods[0]",
+			expectedField:   "methods[0]",
 		},
 		{
-			name:           "mixed valid and invalid",
-			methods:        []string{"/package.Service/Method", "InvalidMethod"},
+			name:            "mixed valid and invalid",
+			methods:         []string{"/package.Service/Method", "InvalidMethod"},
 			expectViolation: true,
-			expectedField:  "methods[1]",
+			expectedField:   "methods[1]",
 		},
 	}
 

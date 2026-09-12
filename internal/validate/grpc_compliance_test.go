@@ -11,85 +11,85 @@ import (
 // Method names are: "/" Service-Name "/" {method name}
 func TestValidation_GRPCCompliance(t *testing.T) {
 	tests := []struct {
-		name        string
-		method      string
+		name         string
+		method       string
 		shouldAccept bool
-		reason      string
+		reason       string
 	}{
 		// Valid gRPC formats - MUST be accepted
 		{
-			name:        "standard format with package",
-			method:      "/package.Service/Method",
+			name:         "standard format with package",
+			method:       "/package.Service/Method",
 			shouldAccept: true,
-			reason:      "Standard gRPC format",
+			reason:       "Standard gRPC format",
 		},
 		{
-			name:        "nested package",
-			method:      "/com.example.api.Service/Method",
+			name:         "nested package",
+			method:       "/com.example.api.Service/Method",
 			shouldAccept: true,
-			reason:      "Nested packages are valid",
+			reason:       "Nested packages are valid",
 		},
 		{
-			name:        "pb suffix common pattern",
-			method:      "/package.pb.Service/Method",
+			name:         "pb suffix common pattern",
+			method:       "/package.pb.Service/Method",
 			shouldAccept: true,
-			reason:      "Proto packages often use .pb suffix",
+			reason:       "Proto packages often use .pb suffix",
 		},
 		{
-			name:        "short format without package",
-			method:      "/Service/Method",
+			name:         "short format without package",
+			method:       "/Service/Method",
 			shouldAccept: true,
-			reason:      "Service without package is valid",
+			reason:       "Service without package is valid",
 		},
 
 		// Invalid formats - MUST be rejected
 		{
-			name:        "missing leading slash",
-			method:      "package.Service/Method",
+			name:         "missing leading slash",
+			method:       "package.Service/Method",
 			shouldAccept: false,
-			reason:      "gRPC requires leading /",
+			reason:       "gRPC requires leading /",
 		},
 		{
-			name:        "missing method separator slash",
-			method:      "/package.Service",
+			name:         "missing method separator slash",
+			method:       "/package.Service",
 			shouldAccept: false,
-			reason:      "gRPC requires /Method after service",
+			reason:       "gRPC requires /Method after service",
 		},
 		{
-			name:        "old dot notation",
-			method:      "package.Service.Method",
+			name:         "old dot notation",
+			method:       "package.Service.Method",
 			shouldAccept: false,
-			reason:      "Not gRPC format",
+			reason:       "Not gRPC format",
 		},
 		{
-			name:        "dot notation with leading slash",
-			method:      "/package.Service.Method",
+			name:         "dot notation with leading slash",
+			method:       "/package.Service.Method",
 			shouldAccept: false,
-			reason:      "Has / but missing method separator",
+			reason:       "Has / but missing method separator",
 		},
 		{
-			name:        "consecutive slashes",
-			method:      "/package.Service//Method",
+			name:         "consecutive slashes",
+			method:       "/package.Service//Method",
 			shouldAccept: false,
-			reason:      "gRPC does not allow //",
+			reason:       "gRPC does not allow //",
 		},
 		{
-			name:        "trailing slash",
-			method:      "/package.Service/Method/",
+			name:         "trailing slash",
+			method:       "/package.Service/Method/",
 			shouldAccept: false,
-			reason:      "gRPC does not allow trailing /",
+			reason:       "gRPC does not allow trailing /",
 		},
 		{
-			name:        "whitespace in method",
-			method:      "/package.Service/ Method",
+			name:         "whitespace in method",
+			method:       "/package.Service/ Method",
 			shouldAccept: false,
-			reason:      "Proto identifiers cannot contain whitespace",
+			reason:       "Proto identifiers cannot contain whitespace",
 		},
 		{
-			name:        "empty string",
-			method:      "",
+			name:         "empty string",
+			method:       "",
 			shouldAccept: false,
-			reason:      "Empty method name invalid",
+			reason:       "Empty method name invalid",
 		},
 	}
 

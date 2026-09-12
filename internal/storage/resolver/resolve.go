@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"os"
 
-	"git.sonicoriginal.software/grpcd/internal/storage"
-	"git.sonicoriginal.software/grpcd/internal/storage/mock"
-	"git.sonicoriginal.software/grpcd/internal/storage/redis"
+	"github.com/grpcd/server/internal/storage"
+	"github.com/grpcd/server/internal/storage/mock"
+	"github.com/grpcd/server/internal/storage/redis"
 )
 
 // Resolve a storage Store by the storage backend and address env variables.
