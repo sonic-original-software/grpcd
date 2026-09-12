@@ -126,6 +126,22 @@ grpcd reports the value in effect at startup.
 A registration lives as long as the stream that made it, so nothing configures
 how long one lasts.
 
+### Health
+
+The health service answers for two entries. `""` says the process is alive.
+`grpcd.GRPCDService` says whether the store can be reached: it reports
+`NOT_SERVING` from the first operation that fails against the store until the
+store's subscription comes back, and `SERVING` otherwise.
+
+A balancer or orchestrator probe that should route around an instance that
+has lost its store asks for `grpcd.GRPCDService`. A probe that asks for `""`
+sees only whether the process is up.
+
+While the store is lost the instance keeps serving: handlers hold what they
+have and wait for the store rather than failing, and when it returns every
+held registration writes its rows again. Pulling the instance from rotation,
+or restarting it, is whoever probes it deciding to; nothing here does either.
+
 ### Example Configurations
 
 **Development (in-memory storage)**:
@@ -158,7 +174,8 @@ refer to the
 | RPC        | Implementation                 | Notes                                                                 |
 | ---------- | ------------------------------ | --------------------------------------------------------------------- |
 | `Register` | `internal/service/register.go` | Holds the stream; writes the rows on open and removes them on its end |
-| `Discover` | `internal/service/discover.go` | Offers one candidate at a time; waits for a registration once exhausted |
+| `Discover` | `internal/service/discover.go` | Offers one candidate at a time, drawn at random; waits for a registration once exhausted |
+| `Watch`    | `internal/service/watch.go`    | Holds the stream; tells a 1/N share of holders when a new address registers |
 
 There is no `Deregister`. Closing the registration stream is what removes the
 rows, so a caller that crashes and one that exits cleanly take the same path.
@@ -184,9 +201,10 @@ socket carries only the ephemeral port it dialed from. See
 grpcd uses an [abstract storage interface](internal/storage/store.go) that
 supports multiple backends.
 
-Nothing takes a TTL. `AddressesFor` returns a sequence rather than a slice, so a
-method with thousands of addresses costs a caller only the candidates it reads
-before it stops.
+Nothing takes a TTL. `AddressesFor` returns a sequence rather than a slice, and
+each pull is one uniform random draw over the set as it is at that moment, so a
+lookup costs O(1) per candidate however many addresses the method has and a
+removed address is never drawn again. The sequence ends when the set is empty.
 
 ### Available Backends
 
@@ -211,7 +229,8 @@ before it stops.
 
 - Persistent storage with optional persistence to disk
 - Publish/subscribe, which is how an instance is told a row it anchors was
-  removed
+  removed, and how one subscription per instance wakes every `Discover`
+  waiting on a registration
 - Horizontal scaling support (all grpcd instances share state)
 - High availability with Redis Sentinel or Redis Cluster
 

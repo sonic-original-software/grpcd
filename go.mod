@@ -7,7 +7,7 @@ require (
 	git.sonicoriginal.software/grpc-protos v0.2.0
 	git.sonicoriginal.software/grpc-testing v0.2.0
 	git.sonicoriginal.software/grpcd-go v0.8.0
-	git.sonicoriginal.software/grpcd-protos v0.3.0
+	git.sonicoriginal.software/grpcd-protos v0.4.0
 	git.sonicoriginal.software/logger v0.1.0
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.18.0

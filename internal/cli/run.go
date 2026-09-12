@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"git.sonicoriginal.software/logger"
 
@@ -24,6 +25,7 @@ import (
 	grpcd "git.sonicoriginal.software/grpcd-protos"
 
 	"git.sonicoriginal.software/grpcd/internal/service"
+	"git.sonicoriginal.software/grpcd/internal/storage"
 	"git.sonicoriginal.software/grpcd/internal/storage/resolver"
 )
 
@@ -42,6 +44,27 @@ func maxConnectionAge() string {
 	}
 
 	return foundation.DefaultMaxConnectionAge.String()
+}
+
+// reportStoreHealth keeps the grpcd service's health entry matching the
+// store's condition, for as long as ctx lives.
+func reportStoreHealth(ctx context.Context, store storage.Store, healthSrv *health.Server) {
+	for {
+		condition := store.Condition()
+
+		status := grpc_health_v1.HealthCheckResponse_SERVING
+		if condition.Lost {
+			status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
+		}
+
+		healthSrv.SetServingStatus(grpcd.GRPCDService_ServiceDesc.ServiceName, status)
+
+		select {
+		case <-condition.Changed:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // Run serves until a signal arrives or serving fails, and answers with the
@@ -109,6 +132,12 @@ func Run() int {
 
 		return 1
 	}
+
+	// The store's reachability is this service's health. Whatever routes to
+	// this instance can ask and decide whether to keep sending clients; the
+	// handlers hold what they have and wait for the store either way. The ""
+	// entry stays SERVING: the process is alive.
+	go reportStoreHealth(serveCtx, store, healthSrv)
 
 	// A client that cannot reach an address has it removed, and that client may
 	// be wrong. This watches for removals of addresses this process anchors and

@@ -28,6 +28,13 @@ func (s *Store) SetAddressesForError(err error) {
 	s.addressesForErr = err
 }
 
+// SetCountError sets an error to be returned by Count
+func (s *Store) SetCountError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.countErr = err
+}
+
 // SetNotifyError sets an error to be returned by Notify
 func (s *Store) SetNotifyError(err error) {
 	s.mu.Lock()
@@ -42,11 +49,15 @@ func (s *Store) SetWatchError(err error) {
 	s.watchErr = err
 }
 
-// SetWatchMethodError sets an error to be returned by WatchMethod
-func (s *Store) SetWatchMethodError(err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.watchMethodErr = err
+// Lose stages the store being unreachable. Pair it with an injected error so
+// the handler under test both fails and finds the store lost.
+func (s *Store) Lose() {
+	s.conditions.Lose()
+}
+
+// Recover stages the store coming back.
+func (s *Store) Recover() {
+	s.conditions.Recover()
 }
 
 // SetPingError sets an error to be returned by Ping

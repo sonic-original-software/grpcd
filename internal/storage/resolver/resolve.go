@@ -28,6 +28,10 @@ func Resolve(ctx context.Context, log *slog.Logger) (storage.Store, error) {
 			return nil, fmt.Errorf("%w: %w", storage.ErrStorageNotReachable, err)
 		}
 
+		if err := store.Listen(ctx); err != nil {
+			return nil, fmt.Errorf("%w: %w", storage.ErrStorageNotReachable, err)
+		}
+
 		log.InfoContext(ctx, "Using redis storage", "address", address)
 
 		return store, nil

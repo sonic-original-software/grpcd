@@ -2,20 +2,16 @@
 package redis
 
 import (
-	"errors"
-
 	"github.com/redis/go-redis/v9"
-)
 
-// isNil reports whether err is Redis answering that a key does not exist, which
-// every caller here treats as an absent value rather than a failure.
-func isNil(err error) bool {
-	return errors.Is(err, redis.Nil)
-}
+	"git.sonicoriginal.software/grpcd/internal/storage"
+)
 
 // Store implements Store using Redis as the backend
 type Store struct {
-	client *redis.Client
+	client     *redis.Client
+	additions  *storage.Additions
+	conditions *storage.Conditions
 }
 
 // NewRedisStore creates a new Redis store
@@ -23,7 +19,21 @@ type Store struct {
 func NewRedisStore(addr string) *Store {
 	client := redis.NewClient(&redis.Options{Addr: addr})
 
-	return &Store{client: client}
+	return &Store{
+		client:     client,
+		additions:  storage.NewAdditions(),
+		conditions: storage.NewConditions(),
+	}
+}
+
+// Latest answers with the most recent addition announced to this instance.
+func (r *Store) Latest() *storage.Addition {
+	return r.additions.Latest()
+}
+
+// Condition answers with the store's reachability.
+func (r *Store) Condition() *storage.Condition {
+	return r.conditions.Current()
 }
 
 // Close closes the Redis connection

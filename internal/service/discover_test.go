@@ -14,7 +14,7 @@ import (
 	"git.sonicoriginal.software/grpcd/internal/storage"
 )
 
-const method = "/principal.pb.PrincipalService/GetPrincipal"
+const method = "/package.Service/Method"
 
 func TestDiscover(t *testing.T) {
 	t.Run("offers a registered address", func(t *testing.T) {
@@ -112,11 +112,12 @@ func TestDiscover(t *testing.T) {
 
 		stream := satisfiedAfter(t.Context(), method)
 
+		exhausted := store.Exhausted(method)
 		returned := discovering(server, stream)
 
 		// Nothing is registered, so the handler is waiting. Only now does a
 		// service register, and the handler is expected to be woken by it.
-		await(t, store.Watching(method), "handler never began waiting")
+		await(t, exhausted, "handler never ran out of candidates")
 
 		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
 			t.Fatalf("failed to register: %v", err)
@@ -140,9 +141,10 @@ func TestDiscover(t *testing.T) {
 
 		stream := satisfiedAfter(t.Context(), method, "10.0.0.1:50054")
 
+		exhausted := store.Exhausted(method)
 		returned := discovering(server, stream)
 
-		await(t, store.Watching(method), "handler never began waiting")
+		await(t, exhausted, "handler never ran out of candidates")
 
 		if got := store.Addresses(method); len(got) != 0 {
 			t.Errorf("expected the dead address to be removed before waiting, got %v", got)
@@ -168,9 +170,10 @@ func TestDiscover(t *testing.T) {
 		ctx, leave := context.WithCancel(t.Context())
 		defer leave()
 
+		exhausted := store.Exhausted(method)
 		returned := discovering(server, satisfiedAfter(ctx, method))
 
-		await(t, store.Watching(method), "handler never began waiting")
+		await(t, exhausted, "handler never ran out of candidates")
 
 		leave()
 
@@ -179,14 +182,115 @@ func TestDiscover(t *testing.T) {
 		}
 	})
 
-	t.Run("returns when the wait cannot be established", func(t *testing.T) {
+	t.Run("holds the discovery through a lost store and draws once it returns", func(t *testing.T) {
 		server, store := newServer()
 
-		store.SetWatchMethodError(errors.New("storage unavailable"))
+		store.SetAddressesForError(errors.New("storage unavailable"))
+		store.Lose()
 
-		err := server.Discover(satisfiedAfter(t.Context(), method))
+		stream := satisfiedAfter(t.Context(), method)
 
-		assertCode(t, err, codes.Internal)
+		failed := store.Failed()
+		returned := discovering(server, stream)
+
+		await(t, failed, "handler never tried to draw")
+
+		store.SetAddressesForError(nil)
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to seed: %v", err)
+		}
+
+		store.Recover()
+
+		if err := await(t, returned, "handler did not offer after the store returned"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := stream.candidates(); !slices.Equal(got, []string{"10.0.0.1:50054"}) {
+			t.Errorf("expected the address, got %v", got)
+		}
+	})
+
+	t.Run("returns when the caller goes away while the store is lost", func(t *testing.T) {
+		server, store := newServer()
+
+		store.SetAddressesForError(errors.New("storage unavailable"))
+		store.Lose()
+
+		ctx, leave := context.WithCancel(t.Context())
+		defer leave()
+
+		failed := store.Failed()
+		returned := discovering(server, satisfiedAfter(ctx, method))
+
+		await(t, failed, "handler never tried to draw")
+
+		leave()
+
+		if err := await(t, returned, "handler did not return"); err == nil {
+			t.Fatal("expected the cancellation to be returned")
+		}
+	})
+
+	t.Run("draws again when the store returns while waiting", func(t *testing.T) {
+		server, store := newServer()
+
+		stream := satisfiedAfter(t.Context(), method)
+
+		exhausted := store.Exhausted(method)
+		returned := discovering(server, stream)
+
+		await(t, exhausted, "handler never ran out of candidates")
+
+		// A recovery wakes the wait: the store may hold registrations this
+		// instance was deaf to. Here it holds nothing, so the handler draws,
+		// finds nothing, and waits again.
+		exhausted = store.Exhausted(method)
+		store.Recover()
+		await(t, exhausted, "handler did not draw again after the store returned")
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to register: %v", err)
+		}
+
+		if err := await(t, returned, "handler did not offer the registration"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("goes back to sleep when another method registers", func(t *testing.T) {
+		server, store := newServer()
+
+		stream := satisfiedAfter(t.Context(), method)
+
+		exhausted := store.Exhausted(method)
+		returned := discovering(server, stream)
+
+		await(t, exhausted, "handler never ran out of candidates")
+
+		// Every registration wakes every waiter. This one is for a method the
+		// handler does not want, so it is expected to draw, find nothing, and
+		// wait again.
+		exhausted = store.Exhausted(method)
+
+		if err := store.Add(t.Context(), "10.0.0.9:50054", testAnchor, []string{"/other.Service/Method"}); err != nil {
+			t.Fatalf("failed to register: %v", err)
+		}
+
+		await(t, exhausted, "handler did not draw again after the wake")
+
+		if err := store.Add(t.Context(), "10.0.0.1:50054", testAnchor, []string{method}); err != nil {
+			t.Fatalf("failed to register: %v", err)
+		}
+
+		if err := await(t, returned, "handler did not offer the registration"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := stream.candidates(); !slices.Equal(got, []string{"10.0.0.1:50054"}) {
+			t.Errorf("expected the registered address, got %v", got)
+		}
 	})
 
 	t.Run("refuses an invalid method name", func(t *testing.T) {
@@ -283,9 +387,12 @@ func TestDiscover(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		want := []string{"10.0.0.1:50054", "10.0.0.2:50054"}
+		// The address was not removed, so the next draw is over the same set and
+		// offers it again. A store that keeps failing is handled by the server
+		// leaving, not by this handler.
+		want := []string{"10.0.0.1:50054", "10.0.0.1:50054"}
 		if got := stream.candidates(); !slices.Equal(got, want) {
-			t.Errorf("expected the next candidate after the failed removal, got %v", got)
+			t.Errorf("expected %v after the failed removal, got %v", want, got)
 		}
 	})
 

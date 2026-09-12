@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"strings"
 
@@ -24,7 +25,7 @@ func (r *Store) Add(ctx context.Context, address, anchor string, methods []strin
 	pipe.Set(ctx, anchorKey(address), anchor, 0)
 
 	if _, err := pipe.Exec(ctx); err != nil {
-		return err
+		return r.observe(ctx, err)
 	}
 
 	// Announced after the write lands, so a waiting Discover that is woken by
@@ -37,7 +38,7 @@ func (r *Store) Add(ctx context.Context, address, anchor string, methods []strin
 
 	_, err := pipe.Exec(ctx)
 
-	return err
+	return r.observe(ctx, err)
 }
 
 // Remove takes address out of each of methods and forgets its anchor.
@@ -52,7 +53,7 @@ func (r *Store) Remove(ctx context.Context, address string, methods []string) er
 
 	_, err := pipe.Exec(ctx)
 
-	return err
+	return r.observe(ctx, err)
 }
 
 // RemoveFromMethod takes address out of one method's set, answering with the
@@ -71,7 +72,7 @@ func (r *Store) RemoveFromMethod(
 	// A missing anchor key makes Exec report redis.Nil, which reports on the
 	// Get rather than on the removal. The removal is what matters here.
 	if _, err := pipe.Exec(ctx); err != nil && !isNil(err) {
-		return "", err
+		return "", r.observe(ctx, err)
 	}
 
 	value, err := anchor.Result()
@@ -79,27 +80,45 @@ func (r *Store) RemoveFromMethod(
 		return "", nil
 	}
 
-	return value, err
+	return value, r.observe(ctx, err)
 }
 
-// AddressesFor walks the addresses serving method.
+// AddressesFor draws addresses serving method.
 //
-// SSCAN pages, so a method with thousands of addresses costs the caller only
-// the pages it reads before it stops.
+// SRANDMEMBER is O(1) and uniform over the set, and a walk is not: SSCAN from
+// cursor 0 answers in the same order every call, which would offer every
+// caller the same first address. Each pull is a fresh draw over what is in the
+// set at that moment, so a member removed since the last pull is not drawn
+// again.
 func (r *Store) AddressesFor(ctx context.Context, method string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		iterator := r.client.SScan(ctx, methodKey(method), 0, "", 0).Iterator()
+		for {
+			address, err := r.client.SRandMember(ctx, methodKey(method)).Result()
 
-		for iterator.Next(ctx) {
-			if !yield(iterator.Val(), nil) {
+			// Nil is Redis answering that the set is empty, which is where the
+			// sequence ends.
+			if isNil(err) {
+				return
+			}
+
+			if err != nil {
+				yield("", r.observe(ctx, err))
+
+				return
+			}
+
+			if !yield(address, nil) {
 				return
 			}
 		}
-
-		if err := iterator.Err(); err != nil {
-			yield("", err)
-		}
 	}
+}
+
+// Count answers with how many addresses serve method. SCARD is O(1).
+func (r *Store) Count(ctx context.Context, method string) (int64, error) {
+	count, err := r.client.SCard(ctx, methodKey(method)).Result()
+
+	return count, r.observe(ctx, err)
 }
 
 // Notify tells the instance identified by anchor which row was removed.
@@ -109,7 +128,7 @@ func (r *Store) AddressesFor(ctx context.Context, method string) iter.Seq2[strin
 func (r *Store) Notify(ctx context.Context, anchor string, removal storage.Removal) error {
 	payload := removal.Method + " " + removal.Address
 
-	return r.client.Publish(ctx, channel(anchor), payload).Err()
+	return r.observe(ctx, r.client.Publish(ctx, channel(anchor), payload).Err())
 }
 
 // Watch delivers the addresses this instance anchored that something else
@@ -118,51 +137,26 @@ func (r *Store) Notify(ctx context.Context, anchor string, removal storage.Remov
 // Subscribe registers the channel before returning, so a removal published
 // after this call reaches the caller.
 func (r *Store) Watch(ctx context.Context, anchor string) (<-chan storage.Removal, error) {
-	return subscribe(ctx, r.client, channel(anchor), func(payload string) (storage.Removal, bool) {
-		method, address, found := strings.Cut(payload, " ")
-
-		return storage.Removal{Method: method, Address: address}, found
-	})
-}
-
-// WatchMethod delivers addresses added to method after the call.
-func (r *Store) WatchMethod(ctx context.Context, method string) (<-chan string, error) {
-	return subscribe(ctx, r.client, additions(method), func(payload string) (string, bool) {
-		return payload, true
-	})
-}
-
-// subscribe holds a subscription to name for as long as ctx lives, decoding
-// each payload with decode and delivering what it accepts.
-//
-// Subscribe registers the channel before returning, so a message published
-// after this call reaches the caller.
-func subscribe[T any](
-	ctx context.Context,
-	client *redis.Client,
-	name string,
-	decode func(string) (T, bool),
-) (<-chan T, error) {
-	subscription := client.Subscribe(ctx, name)
+	subscription := r.client.Subscribe(ctx, channel(anchor))
 
 	if _, err := subscription.Receive(ctx); err != nil {
-		return nil, err
+		return nil, r.observe(ctx, err)
 	}
 
-	delivered := make(chan T)
+	delivered := make(chan storage.Removal)
 
 	go func() {
 		defer close(delivered)
 		defer subscription.Close()
 
 		for message := range subscription.Channel() {
-			value, ok := decode(message.Payload)
-			if !ok {
+			method, address, found := strings.Cut(message.Payload, " ")
+			if !found {
 				continue
 			}
 
 			select {
-			case delivered <- value:
+			case delivered <- storage.Removal{Method: method, Address: address}:
 			case <-ctx.Done():
 				return
 			}
@@ -170,4 +164,26 @@ func subscribe[T any](
 	}()
 
 	return delivered, nil
+}
+
+// Ping checks if Redis is reachable
+func (r *Store) Ping(ctx context.Context) error {
+	return r.observe(ctx, r.client.Ping(ctx).Err())
+}
+
+// observe passes err through, recording the store as lost when it says Redis
+// could not be reached. A missing key is an answer, and the caller's own
+// context ending says nothing about Redis, so neither counts.
+func (r *Store) observe(ctx context.Context, err error) error {
+	if err != nil && !isNil(err) && ctx.Err() == nil {
+		r.conditions.Lose()
+	}
+
+	return err
+}
+
+// isNil reports whether err is Redis answering that a key does not exist, which
+// every caller here treats as an absent value rather than a failure.
+func isNil(err error) bool {
+	return errors.Is(err, redis.Nil)
 }

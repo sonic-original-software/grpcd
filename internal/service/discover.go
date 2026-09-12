@@ -20,17 +20,20 @@ const (
 	errCodeDiscoverFailed = "DISCOVER_FAILED"
 )
 
-// Discover answers with the addresses serving a method, one at a time.
+// Discover answers with the addresses serving a method, one at a time, each
+// drawn at random from the method's set.
 //
 // The caller takes the first it can reach and closes the stream. One it cannot
-// reach it reports back, and that address is removed before the next is sent,
+// reach it reports back, and that address is removed before the next is drawn,
 // so the set converges on what is actually reachable without grpcd checking
-// anything itself.
+// anything itself. The draws end when the set is empty; a caller that keeps
+// refusing without removing is drawn the same addresses again.
 //
-// When there is nothing left to offer, the stream is held and the next address
-// registered for the method is offered as it arrives. A caller whose backend is
+// When there is nothing left to offer, the stream is held until something
+// registers, and the set is drawn from again. A caller whose backend is
 // entirely down blocks on a receive rather than asking again, and is woken by
-// the registration.
+// the registration. Every registration wakes every waiting handler, whatever
+// method it was for; one that finds its own set still empty goes back to sleep.
 func (s *GRPCDServer) Discover(stream grpcd.GRPCDService_DiscoverServer) error {
 	ctx := stream.Context()
 	log := logger.FromContext(ctx)
@@ -45,43 +48,74 @@ func (s *GRPCDServer) Discover(stream grpcd.GRPCDService_DiscoverServer) error {
 
 	sent := 0
 
+	for {
+		// Both loaded before the draw, so a registration or a recovery landing
+		// after the draw finds nothing closes what this waits on.
+		latest := s.store.Latest()
+		condition := s.store.Condition()
+
+		done, storeErr, err := s.draw(ctx, log, stream, method, &sent)
+		if done || err != nil {
+			return err
+		}
+
+		if storeErr != nil {
+			lost, waited := storeLost(ctx, s.store)
+
+			if !lost {
+				log.ErrorContext(ctx, "Failed to discover method", "error", storeErr)
+
+				return foundationerrors.Internal(
+					ctx, "failed to discover method", errCodeDiscoverFailed, internal.ErrDomain,
+				)
+			}
+
+			if !waited {
+				return ctx.Err()
+			}
+
+			log.WarnContext(ctx, "Store returned, drawing again", "error", storeErr)
+
+			continue
+		}
+
+		log.DebugContext(ctx, "No addresses for method, waiting", "candidates_sent", sent)
+
+		// A recovery wakes this too: the store may have gained addresses this
+		// instance was deaf to.
+		select {
+		case <-latest.Done:
+		case <-condition.Changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// draw offers candidates until one works, the set empties, or something
+// fails. It answers done once the caller is satisfied. A store failure is
+// answered apart from a stream failure, because the caller judges the former
+// against the store's condition and returns the latter as is.
+func (s *GRPCDServer) draw(
+	ctx context.Context,
+	log *slog.Logger,
+	stream grpcd.GRPCDService_DiscoverServer,
+	method string,
+	sent *int,
+) (done bool, storeErr, err error) {
 	for address, err := range s.store.AddressesFor(ctx, method) {
 		if err != nil {
-			log.ErrorContext(ctx, "Failed to discover method", "error", err)
-
-			return foundationerrors.Internal(
-				ctx, "failed to discover method", errCodeDiscoverFailed, internal.ErrDomain,
-			)
+			return false, err, nil
 		}
 
-		sent++
+		*sent++
 
 		if done, err := s.offer(ctx, log, stream, method, address); done || err != nil {
-			return err
+			return done, nil, err
 		}
 	}
 
-	log.InfoContext(ctx, "No addresses left for method, waiting", "candidates_sent", sent)
-
-	// Subscribed once, here, and held until this returns — so an address added
-	// between a refusal and the next wait is not missed.
-	additions, err := s.store.WatchMethod(ctx, method)
-	if err != nil {
-		log.ErrorContext(ctx, "Failed to wait for method", "error", err)
-
-		return foundationerrors.Internal(
-			ctx, "failed to discover method", errCodeDiscoverFailed, internal.ErrDomain,
-		)
-	}
-
-	// The store closes this when ctx ends, so the range is what ends the wait.
-	for address := range additions {
-		if done, err := s.offer(ctx, log, stream, method, address); done || err != nil {
-			return err
-		}
-	}
-
-	return ctx.Err()
+	return false, nil, nil
 }
 
 // offer sends address as a candidate and waits for the caller's verdict. It

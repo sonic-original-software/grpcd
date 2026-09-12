@@ -1,6 +1,16 @@
 package redis
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+// additionsPrefix begins every additions channel; additionsPattern matches
+// them all, which is what one instance subscribes to.
+const (
+	additionsPrefix  = "additions:"
+	additionsPattern = additionsPrefix + "*"
+)
 
 // methodKey returns the key holding the set of addresses serving a method
 func methodKey(method string) string {
@@ -19,5 +29,10 @@ func channel(anchor string) string {
 
 // additions returns the pub/sub channel a method's new addresses are announced on
 func additions(method string) string {
-	return fmt.Sprintf("additions:%s", method)
+	return additionsPrefix + method
+}
+
+// methodOf reads the method back out of an additions channel name
+func methodOf(channel string) string {
+	return strings.TrimPrefix(channel, additionsPrefix)
 }

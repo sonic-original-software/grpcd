@@ -1,5 +1,3 @@
-git.sonicoriginal.software/grpc-foundation v0.10.2 h1:ABn95CW85uZ4bSF0gXMRbyKtFUATmqTJU+xgUL4Ro6A=
-git.sonicoriginal.software/grpc-foundation v0.10.2/go.mod h1:7s6DosZ7LyjILuapMcwHfz/V3+uy3m0S99StULqm778=
 git.sonicoriginal.software/grpc-foundation v0.10.3 h1:nSL2ubL/mrnXZQk9BGDYmGoqPARfXkAOrt3Vtv9kWhE=
 git.sonicoriginal.software/grpc-foundation v0.10.3/go.mod h1:7s6DosZ7LyjILuapMcwHfz/V3+uy3m0S99StULqm778=
 git.sonicoriginal.software/grpc-protos v0.2.0 h1:SSJNGf+rA3sXgCRd/+wcKUivgPOPUOmgIZ/S2ASAMaA=
@@ -8,8 +6,8 @@ git.sonicoriginal.software/grpc-testing v0.2.0 h1:DwiOcdQ1VgM0Ertagm6agfL4cXI+a3
 git.sonicoriginal.software/grpc-testing v0.2.0/go.mod h1:3lCO2YmC5T1iNhL5aM2BmknDlvbDNuIraD5bROmLqxM=
 git.sonicoriginal.software/grpcd-go v0.8.0 h1:ZAzYeKTSfrSNGxno4p+GptYTOXrLWaajDAyCq3lURmI=
 git.sonicoriginal.software/grpcd-go v0.8.0/go.mod h1:mJwQ/a0qXipzOCescA7ukeZgaMudo6Qa96X6cDkwPYA=
-git.sonicoriginal.software/grpcd-protos v0.3.0 h1:jdfI/8OGb1MRPkBMdYrHWJc7FtUMo6P2LAGcfExwPdA=
-git.sonicoriginal.software/grpcd-protos v0.3.0/go.mod h1:A61Z1lnQITKinsPh1/N66q/8Em/t+tssTO13qxIyIAQ=
+git.sonicoriginal.software/grpcd-protos v0.4.0 h1:vfDRjrwX4h7057jKE88S53gyRwXSCg2t6Z6yefHMwJs=
+git.sonicoriginal.software/grpcd-protos v0.4.0/go.mod h1:A61Z1lnQITKinsPh1/N66q/8Em/t+tssTO13qxIyIAQ=
 git.sonicoriginal.software/logger v0.1.0 h1:jt5ON2sA9pAqvv30roHDkZ96qg+1IPzPHccyhXDZyMY=
 git.sonicoriginal.software/logger v0.1.0/go.mod h1:EYgVf52UTBSSmcIWMvWepjjccz9WPH24PcVlVY8SkGU=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=

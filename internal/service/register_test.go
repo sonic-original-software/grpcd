@@ -44,8 +44,8 @@ func await[T any](t *testing.T, signal <-chan T, message string) T {
 
 func TestRegister(t *testing.T) {
 	methods := []string{
-		"/principal.pb.PrincipalService/GetPrincipal",
-		"/principal.pb.PrincipalService/CreatePrincipal",
+		"/package.Service/Method",
+		"/package.Service/Other",
 	}
 
 	t.Run("holds the rows for as long as the stream", func(t *testing.T) {
@@ -224,6 +224,121 @@ func TestRegister(t *testing.T) {
 		if err := await(t, returned, "handler did not return"); err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
+	})
+
+	t.Run("holds the registration through a lost store and writes it once the store returns", func(t *testing.T) {
+		server, store := newServer()
+
+		store.SetAddError(errors.New("storage unavailable"))
+		store.Lose()
+
+		ctx, disconnect := context.WithCancel(peerContext(t.Context(), "192.168.1.100:41234"))
+		defer disconnect()
+
+		stream := newRegisterStream(ctx)
+
+		failed := store.Failed()
+		returned := held(server, &grpcd.RegisterRequest{Methods: methods, Port: 50054}, stream)
+
+		// The write failed against a lost store, so the handler is waiting
+		// rather than refusing.
+		await(t, failed, "handler never tried to write")
+
+		if got := stream.sends(); got != 0 {
+			t.Fatalf("expected no acknowledgement while the store is lost, got %d", got)
+		}
+
+		store.SetAddError(nil)
+		store.Recover()
+
+		await(t, stream.acknowledged(), "registration was never acknowledged after the store returned")
+
+		if got := store.Addresses(methods[0]); !slices.Equal(got, []string{"192.168.1.100:50054"}) {
+			t.Errorf("expected the rows to be written, got %v", got)
+		}
+
+		disconnect()
+		await(t, returned, "handler did not return")
+	})
+
+	t.Run("returns when the caller leaves while the store is lost", func(t *testing.T) {
+		server, store := newServer()
+
+		store.SetAddError(errors.New("storage unavailable"))
+		store.Lose()
+
+		ctx, disconnect := context.WithCancel(peerContext(t.Context(), "192.168.1.100:41234"))
+		defer disconnect()
+
+		failed := store.Failed()
+		returned := held(server, &grpcd.RegisterRequest{Methods: methods, Port: 50054}, newRegisterStream(ctx))
+
+		await(t, failed, "handler never tried to write")
+
+		disconnect()
+
+		if err := await(t, returned, "handler did not return"); err == nil {
+			t.Fatal("expected the cancellation to be returned")
+		}
+	})
+
+	t.Run("rewrites the rows when the store returns while holding", func(t *testing.T) {
+		server, store := newServer()
+
+		ctx, disconnect := context.WithCancel(peerContext(t.Context(), "192.168.1.100:41234"))
+		defer disconnect()
+
+		stream := newRegisterStream(ctx)
+
+		returned := held(server, &grpcd.RegisterRequest{Methods: methods, Port: 50054}, stream)
+		await(t, stream.acknowledged(), "registration was never acknowledged")
+
+		// Losing the store while holding is only something to wait out: the
+		// handler looks, sees it lost, and sleeps again without writing.
+		conditioned := store.Conditioned()
+		store.Lose()
+		await(t, conditioned, "handler did not look at the store after it was lost")
+
+		// The store coming back may have come back empty, so the rows are
+		// written again from the request the handler holds.
+		added := store.Added()
+		store.Recover()
+		await(t, added, "handler did not rewrite the rows after the store returned")
+
+		if got := store.Adds(); got != 2 {
+			t.Errorf("expected the rows to be written twice, got %d", got)
+		}
+
+		disconnect()
+		await(t, returned, "handler did not return")
+	})
+
+	t.Run("keeps holding when the rewrite fails", func(t *testing.T) {
+		server, store := newServer()
+
+		ctx, disconnect := context.WithCancel(peerContext(t.Context(), "192.168.1.100:41234"))
+		defer disconnect()
+
+		stream := newRegisterStream(ctx)
+
+		returned := held(server, &grpcd.RegisterRequest{Methods: methods, Port: 50054}, stream)
+		await(t, stream.acknowledged(), "registration was never acknowledged")
+
+		store.SetAddError(errors.New("storage unavailable"))
+
+		failed := store.Failed()
+		store.Recover()
+		await(t, failed, "handler did not try to rewrite the rows")
+
+		// A later recovery is tried again.
+		store.SetAddError(nil)
+
+		added := store.Added()
+		store.Recover()
+		await(t, added, "handler did not rewrite the rows on the next recovery")
+
+		disconnect()
+		await(t, returned, "handler did not return")
 	})
 
 	t.Run("acknowledges once", func(t *testing.T) {

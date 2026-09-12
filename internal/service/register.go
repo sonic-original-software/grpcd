@@ -14,6 +14,7 @@ import (
 	grpcd "git.sonicoriginal.software/grpcd-protos"
 
 	"git.sonicoriginal.software/grpcd/internal"
+	"git.sonicoriginal.software/grpcd/internal/storage"
 	"git.sonicoriginal.software/grpcd/internal/validate"
 )
 
@@ -63,12 +64,9 @@ func (s *GRPCDServer) Register(
 	log.InfoContext(ctx, "Registering service instance")
 	log.DebugContext(ctx, "Registering methods", "methods", req.Methods)
 
-	if err := s.store.Add(ctx, address, s.anchor, req.Methods); err != nil {
-		log.ErrorContext(ctx, "Failed to register methods", "error", err)
-
-		return errors.Internal(
-			ctx, "failed to register service", errCodeRegistrationFailed, internal.ErrDomain,
-		)
+	condition, err := s.write(ctx, log, address, req.Methods)
+	if err != nil {
+		return err
 	}
 
 	if err := stream.Send(&grpcd.RegisterResponse{}); err != nil {
@@ -85,12 +83,64 @@ func (s *GRPCDServer) Register(
 	log.InfoContext(ctx, "Successfully registered service instance")
 
 	// Holding the stream is the registration. Returning ends it, so this waits
-	// for the caller to go away.
-	<-ctx.Done()
+	// for the caller to go away. The store coming back in the meantime means
+	// it may have come back empty, and the rows are written again from the
+	// request this handler still holds.
+	for {
+		select {
+		case <-ctx.Done():
+			s.release(ctx, log, address, req.Methods)
 
-	s.release(ctx, log, address, req.Methods)
+			return nil
+		case <-condition.Changed:
+		}
 
-	return nil
+		if condition = s.store.Condition(); condition.Lost {
+			continue
+		}
+
+		if err := s.store.Add(ctx, address, s.anchor, req.Methods); err != nil {
+			log.ErrorContext(ctx, "Failed to rewrite methods after the store came back", "error", err)
+
+			continue
+		}
+
+		log.InfoContext(ctx, "Rewrote methods after the store came back")
+	}
+}
+
+// write records the rows, waiting out a lost store rather than failing on it.
+// It answers with the condition the rows were written under, for the holder
+// to watch for the next change.
+func (s *GRPCDServer) write(
+	ctx context.Context, log *slog.Logger, address string, methods []string,
+) (*storage.Condition, error) {
+	for {
+		// Read before the write, so a loss the write itself records closes
+		// this one's Changed and the holder wakes to look.
+		condition := s.store.Condition()
+
+		err := s.store.Add(ctx, address, s.anchor, methods)
+		if err == nil {
+			return condition, nil
+		}
+
+		lost, waited := storeLost(ctx, s.store)
+
+		if !lost {
+			log.ErrorContext(ctx, "Failed to register methods", "error", err)
+
+			return nil, errors.Internal(
+				ctx, "failed to register service", errCodeRegistrationFailed, internal.ErrDomain,
+			)
+		}
+
+		if !waited {
+			return nil, ctx.Err()
+		}
+
+		log.WarnContext(ctx, "Store returned, registering again", "error", err)
+	}
 }
 
 // release removes the rows this stream was holding.

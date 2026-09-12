@@ -3,6 +3,7 @@ package service
 
 import (
 	"log/slog"
+	"math/rand/v2"
 
 	"go.opentelemetry.io/otel/metric"
 
@@ -26,11 +27,22 @@ type GRPCDServer struct {
 	store  storage.Store
 	anchor string
 
+	// roll decides whether one holder among n is told to move. Uniform at
+	// random in production; a test substitutes a deterministic answer.
+	roll func(n int64) bool
+
 	// Business metrics
 	registrationCount metric.Int64Counter
 	removalCount      metric.Int64Counter
 	methodsDiscovered metric.Int64Counter
 	revertedRemovals  metric.Int64Counter
+	rebalanceCount    metric.Int64Counter
+}
+
+// oneIn answers true with probability 1/n. A count of zero means the set
+// emptied between the announcement and the count, and nobody moves.
+func oneIn(n int64) bool {
+	return n > 0 && rand.IntN(int(n)) == 0
 }
 
 // NewGRPCDServer creates a new grpcd server.
@@ -88,13 +100,24 @@ func NewGRPCDServer(
 		log.Error("Failed to create reverted removals metric", "error", err)
 	}
 
+	rebalanceCount, err := meter.Int64Counter(
+		"grpcd.rebalances.total",
+		metric.WithDescription("Total number of clients told to move to a newly registered address"),
+		metric.WithUnit("{move}"),
+	)
+	if err != nil {
+		log.Error("Failed to create rebalances metric", "error", err)
+	}
+
 	return &GRPCDServer{
 		log:               log,
 		store:             store,
 		anchor:            anchor,
+		roll:              oneIn,
 		registrationCount: registrationCount,
 		removalCount:      removalCount,
 		methodsDiscovered: methodsDiscovered,
 		revertedRemovals:  revertedRemovals,
+		rebalanceCount:    rebalanceCount,
 	}
 }

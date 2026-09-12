@@ -25,43 +25,68 @@ type Store struct {
 	anchors  map[string]string // address → anchor
 	watchers map[string]chan storage.Removal
 
-	// methodWatchers holds every Discover waiting for a method to gain an
-	// address. Several can wait on one method, so it is a set of channels.
-	methodWatchers map[string]map[chan string]bool
+	// additions announces each Add, the way the Redis store's subscription
+	// announces each publish.
+	additions *storage.Additions
 
-	// watching is closed per method once something is waiting on it, so a test
-	// can add an address after the wait has begun rather than before.
-	watching map[string]chan struct{}
+	// conditions is the store's reachability, which a test stages with Lose
+	// and Recover alongside an injected error.
+	conditions *storage.Conditions
+
+	// adds counts calls to Add, so a test can see a handler write its rows
+	// again.
+	adds int
+
+	// Signals a test registers to act once a handler has reached a point it
+	// cannot otherwise observe: the next Add, the next injected failure, the
+	// next look at the condition.
+	added       chan struct{}
+	failed      chan struct{}
+	conditioned chan struct{}
+
+	// exhausted is closed per method by the next draw that finds nothing, so a
+	// test can act once a handler has run out and is about to wait.
+	exhausted map[string]chan struct{}
+
+	// loaded is closed by the next Latest, so a test can act once a handler
+	// holds the announcement it will sleep on.
+	loaded chan struct{}
 
 	// Error injection for testing
 	addErr              error
 	removeErr           error
 	removeFromMethodErr error
 	addressesForErr     error
+	countErr            error
 	notifyErr           error
 	watchErr            error
-	watchMethodErr      error
 	pingErr             error
 }
 
 // NewStore creates a new in-memory store
 func NewStore() *Store {
 	return &Store{
-		methods:        make(map[string]set),
-		anchors:        make(map[string]string),
-		watchers:       make(map[string]chan storage.Removal),
-		methodWatchers: make(map[string]map[chan string]bool),
-		watching:       make(map[string]chan struct{}),
+		methods:   make(map[string]set),
+		anchors:   make(map[string]string),
+		watchers:  make(map[string]chan storage.Removal),
+		additions:  storage.NewAdditions(),
+		conditions: storage.NewConditions(),
+		exhausted:  make(map[string]chan struct{}),
 	}
 }
 
 // Add records that address serves each of methods, anchored to anchor, and
-// announces the address to anything waiting on those methods.
+// announces each addition.
 func (s *Store) Add(_ context.Context, address, anchor string, methods []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.adds++
+	fire(&s.added)
+
 	if s.addErr != nil {
+		fire(&s.failed)
+
 		return s.addErr
 	}
 
@@ -71,18 +96,15 @@ func (s *Store) Add(_ context.Context, address, anchor string, methods []string)
 		}
 
 		s.methods[method][address] = true
-
-		// Fire and forget, as Pub/Sub is: a watcher that is not ready to
-		// receive misses it.
-		for watcher := range s.methodWatchers[method] {
-			select {
-			case watcher <- address:
-			default:
-			}
-		}
 	}
 
 	s.anchors[address] = anchor
+
+	// Announced after the write lands, so a waiter woken by this finds the
+	// address in the set when it looks.
+	for _, method := range methods {
+		s.additions.Announce(method, address)
+	}
 
 	return nil
 }
@@ -130,27 +152,70 @@ func (s *Store) RemoveFromMethod(_ context.Context, method, address string) (str
 	return anchor, nil
 }
 
-// AddressesFor walks the addresses serving method, in a stable order so a test
-// asserting on candidates does not depend on map iteration.
+// AddressesFor draws addresses serving method. Each pull takes the smallest
+// member of the set as it is at that moment, which stands in for the Redis
+// store's random draw while keeping the order a test asserts on stable. The
+// sequence ends when the set is empty, so a member the caller does not remove
+// is drawn again.
 func (s *Store) AddressesFor(_ context.Context, method string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		s.mu.RLock()
-		addresses := slices.Sorted(maps(s.methods[method]))
-		err := s.addressesForErr
-		s.mu.RUnlock()
+		for {
+			address, found, err := s.draw(method)
 
-		if err != nil {
-			yield("", err)
+			if err != nil {
+				yield("", err)
 
-			return
-		}
+				return
+			}
 
-		for _, address := range addresses {
+			if !found {
+				return
+			}
+
 			if !yield(address, nil) {
 				return
 			}
 		}
 	}
+}
+
+// draw answers with the smallest address serving method, or found false when
+// none does, telling anything waiting on Exhausted.
+func (s *Store) draw(method string) (address string, found bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.addressesForErr != nil {
+		fire(&s.failed)
+
+		return "", false, s.addressesForErr
+	}
+
+	addresses := slices.Sorted(maps(s.methods[method]))
+	if len(addresses) == 0 {
+		if signal, waited := s.exhausted[method]; waited {
+			close(signal)
+			delete(s.exhausted, method)
+		}
+
+		return "", false, nil
+	}
+
+	return addresses[0], true, nil
+}
+
+// Count answers with how many addresses serve method.
+func (s *Store) Count(_ context.Context, method string) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.countErr != nil {
+		fire(&s.failed)
+
+		return 0, s.countErr
+	}
+
+	return int64(len(s.methods[method])), nil
 }
 
 // Notify delivers removal to whoever is watching anchor.
@@ -197,60 +262,99 @@ func (s *Store) Watch(ctx context.Context, anchor string) (<-chan storage.Remova
 	return watcher, nil
 }
 
-// WatchMethod delivers addresses added to method after the call.
-func (s *Store) WatchMethod(ctx context.Context, method string) (<-chan string, error) {
+// Latest answers with the most recent addition announced, telling anything
+// waiting on Loaded.
+func (s *Store) Latest() *storage.Addition {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.watchMethodErr != nil {
-		return nil, s.watchMethodErr
+	if s.loaded != nil {
+		close(s.loaded)
+		s.loaded = nil
 	}
 
-	// Buffered by one so Add never blocks on a watcher that is between reads.
-	watcher := make(chan string, 1)
-
-	if s.methodWatchers[method] == nil {
-		s.methodWatchers[method] = make(map[chan string]bool)
-	}
-
-	s.methodWatchers[method][watcher] = true
-
-	if signal, waited := s.watching[method]; waited {
-		close(signal)
-		delete(s.watching, method)
-	}
-
-	go func() {
-		<-ctx.Done()
-
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		// Removed from the set before closing, under the same lock Add
-		// iterates under, so nothing can send on it afterwards.
-		delete(s.methodWatchers[method], watcher)
-		close(watcher)
-	}()
-
-	return watcher, nil
+	return s.additions.Latest()
 }
 
-// Watching answers with a channel closed once something is waiting on method.
-// A test that wants to add an address after a Discover has begun waiting, rather
-// than before, blocks on this first.
-func (s *Store) Watching(method string) <-chan struct{} {
+// Condition answers with the store's reachability, telling anything waiting
+// on Conditioned.
+func (s *Store) Condition() *storage.Condition {
+	s.mu.Lock()
+	fire(&s.conditioned)
+	s.mu.Unlock()
+
+	return s.conditions.Current()
+}
+
+// Adds answers with how many times Add was called, for assertions.
+func (s *Store) Adds() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.adds
+}
+
+// Added answers with a channel closed by the next call to Add.
+func (s *Store) Added() <-chan struct{} {
+	return s.register(&s.added)
+}
+
+// Failed answers with a channel closed by the next injected error returned.
+// A test registers it before staging the failure, then acts once the handler
+// has seen the error and is about to wait.
+func (s *Store) Failed() <-chan struct{} {
+	return s.register(&s.failed)
+}
+
+// Conditioned answers with a channel closed by the next call to Condition.
+func (s *Store) Conditioned() <-chan struct{} {
+	return s.register(&s.conditioned)
+}
+
+// register hands out a fresh signal for slot.
+func (s *Store) register(slot *chan struct{}) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	signal := make(chan struct{})
+	*slot = signal
 
-	if len(s.methodWatchers[method]) > 0 {
-		close(signal)
+	return signal
+}
 
-		return signal
+// fire closes the signal in slot, if one is registered. Called under mu.
+func fire(slot *chan struct{}) {
+	if *slot != nil {
+		close(*slot)
+		*slot = nil
 	}
+}
 
-	s.watching[method] = signal
+// Loaded answers with a channel closed by the next call to Latest. A test
+// registers it before starting a handler that sleeps on the announcement it
+// loads, so an addition made once it fires reaches that handler as a wake
+// rather than being announced before it looked.
+func (s *Store) Loaded() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	signal := make(chan struct{})
+	s.loaded = signal
+
+	return signal
+}
+
+// Exhausted answers with a channel closed by the next draw for method that
+// finds nothing. A test registers it before starting the handler, so the draw
+// cannot come first, and then adds an address once it fires: the handler is
+// out of candidates and waiting, so the addition reaches it as a wake rather
+// than as a candidate.
+func (s *Store) Exhausted(method string) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	signal := make(chan struct{})
+	s.exhausted[method] = signal
 
 	return signal
 }

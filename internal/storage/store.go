@@ -43,6 +43,9 @@ type Removal struct {
 // Nothing it stores expires. A row is removed when the instance holding that
 // address's registration stream sees the stream end, or when a client reports
 // it could not reach the address.
+//
+// It also announces every addition to the instance, through Latest, so a
+// handler waiting for a registration is woken rather than asking again.
 type Store interface {
 	// Add records that address serves each of methods, anchored to the instance
 	// identified by anchor.
@@ -68,12 +71,23 @@ type Store interface {
 	// Those other methods are removed the same way, by a client failing on them.
 	RemoveFromMethod(ctx context.Context, method, address string) (anchor string, err error)
 
-	// AddressesFor walks the addresses serving method. The sequence ends after
-	// the last address, or early if the caller stops reading, so a method with
-	// thousands of addresses is never materialized to answer one lookup.
+	// AddressesFor draws addresses serving method. Each pull yields one address
+	// drawn uniformly at random from the set as it is at that moment, so fresh
+	// connections spread across replicas rather than piling onto whichever
+	// member a walk would return first.
+	//
+	// The sequence ends when the set is empty. It does not end on its own while
+	// the set has members: the caller stops pulling when a candidate works, and
+	// removes a candidate that does not before pulling again, so a draw never
+	// returns an address reported dead unless something wrote it back.
 	//
 	// A method with no addresses yields nothing.
 	AddressesFor(ctx context.Context, method string) iter.Seq2[string, error]
+
+	// Count answers with how many addresses serve method right now. A Watch
+	// draws against it: the new replica's fair share of holders is one in this
+	// many.
+	Count(ctx context.Context, method string) (int64, error)
 
 	// Notify tells the instance identified by anchor which row was removed.
 	Notify(ctx context.Context, anchor string, removal Removal) error
@@ -82,13 +96,22 @@ type Store interface {
 	// removed. It stops when ctx is done.
 	Watch(ctx context.Context, anchor string) (<-chan Removal, error)
 
-	// WatchMethod delivers addresses added to method after the call. It stops
-	// when ctx is done.
+	// Latest answers with the most recent addition announced to this instance,
+	// for any method. Its Done is closed when a newer one is announced.
 	//
-	// A Discover that has run out of candidates waits on this rather than
-	// answering, so a consumer whose backend is entirely down is woken by the
-	// next registration instead of asking again.
-	WatchMethod(ctx context.Context, method string) (<-chan string, error)
+	// A Discover that has run out of candidates loads this, then reads its
+	// method's set, then sleeps on Done: an addition landing after the read
+	// closes the Done it holds, so the wait is not slept through. Every sleeper
+	// is woken by every addition and re-reads its own set to learn whether the
+	// addition was for it.
+	Latest() *Addition
+
+	// Condition answers with the store's reachability. A handler that fails
+	// against the store loads this, and if Lost, sleeps on Changed and tries
+	// again. Load it before the operation whose failure it explains, the same
+	// way Latest is loaded before the draw it covers, so a recovery landing in
+	// between is not slept through.
+	Condition() *Condition
 
 	// Ping checks storage connectivity
 	Ping(ctx context.Context) error
