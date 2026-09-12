@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## 0.5.1 - 2026-09-12
+#### Bug Fixes
+- version bumps - (adc9a8f) - Nathan Blair
+
+- - -
+
 ## 0.5.0 - 2026-09-12
 #### Features
 - draw candidates at random, add Watch, and wait out a lost store - (537a56e) - Nathan Blair
